@@ -7,6 +7,7 @@ use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
@@ -76,31 +77,57 @@ class NabizServiceProvider extends ServiceProvider
     }
 
     /**
-     * Exception kancası.
+     * Exception kancası — iki yoldan.
      *
-     * `reportable` yalnızca raporlama zincirine eklenir; **`false` DÖNDÜRÜLMEZ**
-     * — döndürülseydi Laravel'in kendi loglaması durur ve paket uygulamanın
-     * davranışını değiştirmiş olurdu. Exception yutulmaz, `throw` zinciri
-     * kesilmez.
+     * **1. MessageLogged olayı (birincil).** Laravel'in handler'ı raporlanan
+     * her istisnayı `['exception' => $e]` bağlamıyla loglar. Bu olay handler
+     * sınıfından bağımsızdır ve her zaman tetiklenir.
+     *
+     * **2. reportable (ikincil).** Standart kurulumlarda çalışır.
+     *
+     * Neden ikisi birden: Collision gibi paketler konsolda handler'ı kendi
+     * sarmalayıcısıyla değiştiriyor ve boot sırasında kaydedilen reportable
+     * geri çağrısı başka bir örnekte kalabiliyor — gerçek bir kurulumda tam
+     * olarak bu yaşandı, hiçbir istisna raporlanmadı. Çift kayıt sorun değil:
+     * Recorder aynı istisnayı iki kez göndermez (spl_object_id ile eler).
+     *
+     * `reportable` **`false` DÖNDÜRMEZ** — döndürseydi Laravel'in kendi
+     * loglaması durur ve paket uygulamanın davranışını değiştirmiş olurdu.
      */
     private function hookExceptions(): void
     {
         try {
-            $handler = $this->app->make(ExceptionHandler::class);
+            $this->app['events']->listen(MessageLogged::class, function (MessageLogged $olay) {
+                $e = $olay->context['exception'] ?? null;
 
-            if (! method_exists($handler, 'reportable')) {
-                return;
-            }
-
-            $handler->reportable(function (Throwable $e) {
-                try {
-                    $this->app->make(Recorder::class)->recordException($e);
-                } catch (Throwable) {
-                    // Kendi hatasını raporlamaz — sonsuz döngü riski.
+                if ($e instanceof Throwable) {
+                    $this->kaydet($e);
                 }
             });
         } catch (Throwable) {
             // Sessiz.
+        }
+
+        // Sağlayıcı sırası önemli: tüm paketler yüklendikten sonra çözülür.
+        $this->app->booted(function () {
+            try {
+                $handler = $this->app->make(ExceptionHandler::class);
+
+                if (method_exists($handler, 'reportable')) {
+                    $handler->reportable(fn (Throwable $e) => $this->kaydet($e));
+                }
+            } catch (Throwable) {
+                // Sessiz.
+            }
+        });
+    }
+
+    private function kaydet(Throwable $e): void
+    {
+        try {
+            $this->app->make(Recorder::class)->recordException($e);
+        } catch (Throwable) {
+            // Kendi hatasını raporlamaz — sonsuz döngü riski.
         }
     }
 
