@@ -36,11 +36,50 @@ test('normalize edilmiş SQL kişisel veri içermez', function () {
 });
 
 test('stack trace 2000 karakterde kesilir', function () {
-    expect(Scrubber::stack(str_repeat('x', 5000)))->toHaveLength(2000);
+    // Gerçekçi bir iz: tek harften oluşan blok jeton desenine takılırdı.
+    $iz = str_repeat("#0 /app/vendor/laravel/framework/src/Foo.php(42): bar()\n", 200);
+
+    expect(Scrubber::stack($iz))->toHaveLength(2000);
 });
 
 test('boş değerler null döner', function () {
     expect(Scrubber::text(null, 500))->toBeNull()
         ->and(Scrubber::path(''))->toBeNull()
         ->and(Scrubber::sql(null))->toBeNull();
+});
+
+/**
+ * Gerçek bir sızıntıda yakalandı: QueryException'ın mesajı SQL'i bağlanmış
+ * değerlerle taşıyor ve içinde oturum kimliği vardı.
+ */
+test('SQL taşıyan exception mesajından oturum kimliği sızmaz', function () {
+    $mesaj = 'Database error (Connection: sqlite, SQL: select * from "sessions" '
+        .'where "id" = ItLsnnji2VLJtiE1SjiyAEdzv6aZiuVqhFvcmRu1 limit 1)';
+
+    $sonuc = Scrubber::message($mesaj, true);
+
+    // SQL normalizasyonu değeri `?` ile değiştiriyor; jeton desenine
+    // kalmadan temizleniyor. Önemli olan kimliğin çıkmaması.
+    expect($sonuc)->not->toContain('ItLsnnji2VLJtiE1SjiyAEdzv6aZiuVqhFvcmRu1')
+        ->and($sonuc)->toContain('"?" = ?');
+});
+
+test('uzun rastgele diziler her mesajda maskelenir', function () {
+    // Fixture bilinçli olarak hiçbir sağlayıcının anahtar biçimine benzemiyor:
+    // gerçekçi bir sağlayıcı öneki kullanmak GitHub'ın gizli anahtar
+    // taramasına takılıp push'u engelliyordu.
+    expect(Scrubber::text('Token: ornek_jeton_ABCDEFGHIJKLMNOPQRSTUVWXYZ', 500))
+        ->toContain('[jeton]');
+});
+
+test('normal kelimeler ve sınıf adları maskelenmez', function () {
+    $mesaj = 'Illuminate\\Database\\QueryException on ProductController@show';
+
+    expect(Scrubber::text($mesaj, 500))->toBe($mesaj);
+});
+
+test('SQL literal değerleri mesajda da normalize edilir', function () {
+    $sonuc = Scrubber::message("SQL: insert into users (email) values ('a@b.com')", true);
+
+    expect($sonuc)->not->toContain('a@b.com');
 });
