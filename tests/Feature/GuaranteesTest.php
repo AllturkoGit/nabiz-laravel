@@ -6,6 +6,8 @@ use Allturko\Nabiz\Recorder;
 use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Validation\ValidationException;
 
 /*
@@ -219,4 +221,75 @@ test('sorgu sayacı olayla birlikte gider — N+1 tespiti için', function () {
     $recorder->recordException(new RuntimeException('hata'));
 
     expect($client->gonderilenler[0]['query_count'])->toBe(87);
+});
+
+/**
+ * Gerçek uygulamada yakalandı: Laravel terminate() için middleware'i
+ * konteynerdan YENİDEN çözüyor. Başlangıç zamanı middleware alanında
+ * tutulsaydı o örnekte boş kalır, süre microtime × 1000 (~1,7 trilyon ms)
+ * çıkar ve HER istek "yavaş" görünürdü.
+ */
+test('istek süresi gerçekçi ölçülür', function () {
+    $client = new class extends HubClient
+    {
+        public array $gonderilenler = [];
+
+        public function __construct()
+        {
+            parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
+        }
+
+        public function send(array $payload): void
+        {
+            $this->gonderilenler[] = $payload;
+        }
+    };
+
+    $recorder = new Recorder($client, [
+        'env' => 'testing', 'release' => null,
+        'slow_request_ms' => 1, 'slow_query_ms' => 500,
+        'capture_user_id' => false, 'ignore' => [],
+    ]);
+
+    $recorder->startRequest(microtime(true) - 0.05);   // 50 ms önce başladı
+
+    $recorder->recordRequest(
+        Request::create('/urunler'),
+        new Response('ok', 200),
+    );
+
+    $sure = $client->gonderilenler[0]['duration_ms'];
+
+    // 50 ms civarı bekliyoruz; saniyeler veya trilyonlar değil.
+    expect($sure)->toBeGreaterThan(10)->toBeLessThan(5000);
+});
+
+test('istek başlamadan terminate çağrılırsa olay üretilmez', function () {
+    $client = new class extends HubClient
+    {
+        public array $gonderilenler = [];
+
+        public function __construct()
+        {
+            parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
+        }
+
+        public function send(array $payload): void
+        {
+            $this->gonderilenler[] = $payload;
+        }
+    };
+
+    $recorder = new Recorder($client, [
+        'env' => 'testing', 'release' => null,
+        'slow_request_ms' => 1, 'slow_query_ms' => 500,
+        'capture_user_id' => false, 'ignore' => [],
+    ]);
+
+    $recorder->recordRequest(
+        Request::create('/urunler'),
+        new Response('ok', 500),
+    );
+
+    expect($client->gonderilenler)->toBeEmpty();
 });

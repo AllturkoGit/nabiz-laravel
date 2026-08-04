@@ -23,6 +23,20 @@ class Scrubber
         '/\b\d(?:[\s-]?\d){12,18}\b/' => '[kart]',
         '/\b[1-9]\d{10}\b/' => '[tckn]',
         '/(?:\+90|0)?[\s-]?5\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b/' => '[telefon]',
+
+        /*
+        | Uzun rastgele diziler: oturum kimliği, API anahtarı, jeton, hash.
+        | Gerçek bir sızıntıda yakalandı — QueryException'ın mesajı SQL'i
+        | bağlanmış değerlerle taşıyor ve orada oturum kimliği vardı:
+        |   select * from "sessions" where "id" = ItLsnnji2VLJtiE1SjiyAEdzv...
+        |
+        | 24 hane eşiği bilinçli: Laravel oturum kimliği 40, API anahtarları
+        | 32+; normal kelimeler ve sınıf adları bu uzunluğa ulaşmaz.
+        |
+        | Alt çizgi ve tire dahil: `<onek>_<uzun-dizi>` biçimindeki jetonlar
+        | sözcük sınırıyla aranınca kaçıyordu.
+        */
+        '/[A-Za-z0-9][A-Za-z0-9_\-]{23,}/' => '[jeton]',
     ];
 
     public static function text(?string $value, int $limit): ?string
@@ -73,6 +87,28 @@ class Scrubber
         $value = preg_replace('/\b(IN)\s*\(\s*\?(?:\s*,\s*\?)+\s*\)/i', '$1 (?)', $value) ?? $value;
 
         return self::text(preg_replace('/\s+/', ' ', trim($value)), 500);
+    }
+
+    /**
+     * Exception mesajı.
+     *
+     * QueryException'ın mesajı SQL'i bağlanmış değerlerle birlikte taşır;
+     * önce SQL normalize edilir, sonra genel maskeleme uygulanır. Yalnızca
+     * `slowest_query_sql` alanını normalize etmek yetmiyordu — asıl sızıntı
+     * mesajın kendisinden oluyordu.
+     */
+    public static function message(?string $value, bool $sqlIceriyor = false): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($sqlIceriyor) {
+            $value = preg_replace("/'(?:[^']|'')*'/", '?', $value) ?? $value;
+            $value = preg_replace('/"(?:[^"]|"")*"(\s*=\s*)\S+/', '"?"$1?', $value) ?? $value;
+        }
+
+        return self::text($value, 500);
     }
 
     /**

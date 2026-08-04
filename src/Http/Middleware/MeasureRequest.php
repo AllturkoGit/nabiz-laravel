@@ -16,15 +16,19 @@ use Throwable;
  */
 class MeasureRequest
 {
-    private float $startedAt = 0.0;
-
     public function __construct(private readonly Recorder $recorder) {}
 
     public function handle(Request $request, Closure $next): Response
     {
-        // LARAVEL_START uygulamanın gerçek başlangıcıdır; middleware'e
-        // gelene kadar geçen süre de ölçüme dahil olsun.
-        $this->startedAt = defined('LARAVEL_START') ? LARAVEL_START : microtime(true);
+        // Başlangıç zamanı Recorder'da tutuluyor: Laravel terminate() için
+        // middleware'i konteynerdan YENİDEN çözüyor, bu örnekteki alan orada
+        // boş kalırdı.
+        //
+        // LARAVEL_START uygulamanın gerçek başlangıcıdır; framework'ün
+        // önyükleme süresi de ölçüme dahil olsun.
+        $this->recorder->startRequest(
+            defined('LARAVEL_START') ? LARAVEL_START : microtime(true),
+        );
 
         return $next($request);
     }
@@ -32,11 +36,7 @@ class MeasureRequest
     public function terminate(Request $request, Response $response): void
     {
         try {
-            $this->recorder->recordRequest(
-                $request,
-                $response,
-                (microtime(true) - $this->startedAt) * 1000,
-            );
+            $this->recorder->recordRequest($request, $response);
         } catch (Throwable) {
             // Paket kendi hatasıyla uygulamayı etkilemez.
         }

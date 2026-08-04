@@ -25,10 +25,27 @@ class Recorder
     /** Aynı istekte aynı exception iki kez raporlanmasın. */
     private array $reported = [];
 
+    /**
+     * İstek başlangıcı. Middleware'de DEĞİL burada tutuluyor: Laravel
+     * terminate() için middleware'i konteynerdan yeniden çözüyor ve yeni
+     * örnekte alan boş kalıyordu. Sonuç süre olarak microtime × 1000
+     * (~1,7 trilyon ms) çıkıyor, her istek "yavaş" görünüyordu.
+     *
+     * Recorder istek boyunca singleton; doğru yer burası.
+     */
+    private ?float $startedAt = null;
+
     public function __construct(
         private readonly HubClient $client,
         private readonly array $config,
     ) {}
+
+    /** Middleware'in handle aşamasında çağrılır. */
+    public function startRequest(float $at): void
+    {
+        // İlk çağrı kazanır: alt istekler (Route::dispatch) başlangıcı ezmesin.
+        $this->startedAt ??= $at;
+    }
 
     /** DB::listen kancasından çağrılır. */
     public function recordQuery(string $sql, float $timeMs): void
@@ -60,7 +77,9 @@ class Recorder
 
         $this->send([
             'kind' => 'exception',
-            'msg' => Scrubber::text($e->getMessage(), 500),
+            // QueryException mesajı SQL'i bağlanmış değerlerle taşır; oturum
+            // kimliği, e-posta, kart numarası oradan sızabilir.
+            'msg' => Scrubber::message($e->getMessage(), $this->sqlIceriyor($e)),
             'exception_class' => $e::class,
             'stack' => Scrubber::stack($e->getTraceAsString()),
             'file' => Scrubber::path($e->getFile()),
@@ -72,8 +91,13 @@ class Recorder
      * İstek bitiminde çağrılır (terminate). Kullanıcı yanıtı çoktan
      * gönderilmiştir; burada harcanan süre kimseyi bekletmez.
      */
-    public function recordRequest(Request $request, Response $response, float $durationMs): void
+    public function recordRequest(Request $request, Response $response): void
     {
+        if ($this->startedAt === null) {
+            return;
+        }
+
+        $durationMs = (microtime(true) - $this->startedAt) * 1000;
         $status = $response->getStatusCode();
         $slow = $durationMs >= $this->config['slow_request_ms'];
 
@@ -155,6 +179,16 @@ class Recorder
         } catch (Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Mesajı SQL taşıyan istisnalar. Sınıf adına bakılıyor çünkü paket
+     * illuminate/database'e bağımlı değil ve olmamalı.
+     */
+    private function sqlIceriyor(Throwable $e): bool
+    {
+        return str_contains($e::class, 'QueryException')
+            || str_contains($e::class, 'PDOException');
     }
 
     private function ignored(Throwable $e): bool
