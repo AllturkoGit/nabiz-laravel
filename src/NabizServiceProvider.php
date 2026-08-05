@@ -2,6 +2,7 @@
 
 namespace Allturko\Nabiz;
 
+use Allturko\Nabiz\Console\DurumCommand;
 use Allturko\Nabiz\Http\Middleware\MeasureRequest;
 use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Contracts\Debug\ExceptionHandler;
@@ -43,6 +44,10 @@ class NabizServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__.'/../config/nabiz.php' => config_path('nabiz.php'),
         ], 'nabiz');
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([DurumCommand::class]);
+        }
 
         // NABIZ_ENABLED=false iken hiçbir kanca kurulmaz — sıfır ek yük.
         if (! config('nabiz.enabled')) {

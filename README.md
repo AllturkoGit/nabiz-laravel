@@ -35,6 +35,27 @@ NABIZ_ENV=production
 Service provider Laravel'in paket keşfi ile otomatik yüklenir; elle kayıt gerekmez.
 Anahtar ve secret değerleri Nabız panelindeki **Kurulum** sekmesinden alınır.
 
+### Kurulumu doğrulayın
+
+```bash
+php artisan nabiz:durum
+```
+
+Bu adım atlanmamalı. Paketin en pahalı arıza biçimi sessiz çalışmamadır: secret eksik
+kopyalanmışsa hiçbir şey patlamaz, hiçbir log düşmez — hub geçersiz imzaya da `204`
+döner. Kurulum aylarca çalışmıyor olabilir ve bu sessizlik "sorun yok" sanılır.
+
+Komut yerelde yanlış olan ne varsa gösterir: eksik değişken, hatalı secret uzunluğu,
+şifresiz hub adresi.
+
+```bash
+php artisan nabiz:durum --test   # hub'a bir sınama olayı gönderir
+```
+
+Verinin gerçekten ulaştığı yalnızca **hub panelinden** doğrulanır: proje satırındaki
+bağlantı durumu `Bağlı` görünmelidir. Komut bunu kendi başına söyleyemez, çünkü hub
+geçerli ile geçersiz imzayı dışarıya aynı yanıtla karşılar.
+
 ---
 
 ## Ne toplar
