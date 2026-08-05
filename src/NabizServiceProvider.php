@@ -102,11 +102,11 @@ class NabizServiceProvider extends ServiceProvider
     private function hookExceptions(): void
     {
         try {
-            $this->app['events']->listen(MessageLogged::class, function (MessageLogged $olay) {
-                $e = $olay->context['exception'] ?? null;
+            $this->app['events']->listen(MessageLogged::class, function (MessageLogged $event) {
+                $e = $event->context['exception'] ?? null;
 
                 if ($e instanceof Throwable) {
-                    $this->kaydet($e);
+                    $this->record($e);
                 }
             });
         } catch (Throwable) {
@@ -119,7 +119,7 @@ class NabizServiceProvider extends ServiceProvider
                 $handler = $this->app->make(ExceptionHandler::class);
 
                 if (method_exists($handler, 'reportable')) {
-                    $handler->reportable(fn (Throwable $e) => $this->kaydet($e));
+                    $handler->reportable(fn (Throwable $e) => $this->record($e));
                 }
             } catch (Throwable) {
                 // Sessiz.
@@ -127,7 +127,7 @@ class NabizServiceProvider extends ServiceProvider
         });
     }
 
-    private function kaydet(Throwable $e): void
+    private function record(Throwable $e): void
     {
         try {
             $this->app->make(Recorder::class)->recordException($e);

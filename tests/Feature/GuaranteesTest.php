@@ -75,9 +75,11 @@ test('yok sayılan exception sınıfları raporlanmaz', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -105,9 +107,11 @@ test('aynı exception iki kez raporlanmaz', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -135,9 +139,11 @@ test('raporlanan olayda kişisel veri bulunmaz', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -169,9 +175,11 @@ test('yavaş sorgu normalize edilerek raporlanır, eşik altı sorgu raporlanmaz
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -202,9 +210,11 @@ test('sorgu sayacı olayla birlikte gider — N+1 tespiti için', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -239,9 +249,11 @@ test('istek süresi gerçekçi ölçülür', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 
@@ -274,9 +286,11 @@ test('istek başlamadan terminate çağrılırsa olay üretilmez', function () {
             parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
         }
 
-        public function send(array $payload): void
+        public function send(array $payload): array
         {
             $this->gonderilenler[] = $payload;
+
+            return ['sent' => true, 'status' => 204];
         }
     };
 

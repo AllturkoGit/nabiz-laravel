@@ -29,19 +29,31 @@ class HubClient
     }
 
     /**
+     * Sonuç döndürür ama **asla istisna fırlatmaz.**
+     *
+     * Sonucu yalnızca teşhis komutu okuyor; izleme yolu görmezden geliyor.
+     * Gönderim başarısızsa yapılacak bir şey yok, izlenen uygulamayı bundan
+     * haberdar etmek log kirliliğinden başka işe yaramaz (davranış garantisi 4).
+     *
+     * Yine de sonucu üretmek zorunlu: `nabiz:durum --test` "gönderildi" derken
+     * gerçekte hiçbir şey gitmemiş olabiliyordu ve kuran kişi kurulumu çalışır
+     * sanıyordu. Teşhis aracının yanlış teşhis koyması, hiç teşhis koymamaktan
+     * kötüdür.
+     *
      * @param  array<string, mixed>  $payload
+     * @return array{sent: bool, status?: int, error?: string}
      */
-    public function send(array $payload): void
+    public function send(array $payload): array
     {
         if (! $this->configured()) {
-            return;
+            return ['sent' => false, 'error' => 'yapilandirma-eksik'];
         }
 
         try {
             $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
             if ($body === false) {
-                return;
+                return ['sent' => false, 'error' => 'govde-kodlanamadi'];
             }
 
             $timestamp = (string) time();
@@ -68,11 +80,25 @@ class HubClient
                 ],
             ]);
 
-            curl_exec($ch);
+            $result = curl_exec($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
             curl_close($ch);
-        } catch (Throwable) {
+
+            if ($result === false || $error !== '') {
+                return ['sent' => false, 'error' => $error !== '' ? $error : 'curl-basarisiz'];
+            }
+
+            /*
+            | Hub başarıda da geçersiz istekte de 204 döner (saldırgana geri
+            | bildirim verilmez). Yani 204 "kabul edildi" demek DEĞİL, yalnızca
+            | "istek ulaştı" demek. Teşhis komutu bunu açıkça yazıyor.
+            */
+            return ['sent' => $status > 0 && $status < 400, 'status' => $status];
+        } catch (Throwable $e) {
             // Sessizce vazgeç. İzleme paketinin izlediği uygulamayı bozması,
             // çözdüğü sorundan büyük bir sorundur.
+            return ['sent' => false, 'error' => $e->getMessage()];
         }
     }
 }

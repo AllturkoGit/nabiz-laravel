@@ -69,17 +69,24 @@ class Recorder
         }
     }
 
-    public function recordException(Throwable $e): void
+    /**
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function recordException(Throwable $e): array
     {
-        if ($this->ignored($e) || $this->alreadyReported($e)) {
-            return;
+        if ($this->ignored($e)) {
+            return ['sent' => false, 'error' => 'yok-sayildi'];
         }
 
-        $this->send([
+        if ($this->alreadyReported($e)) {
+            return ['sent' => false, 'error' => 'zaten-raporlandi'];
+        }
+
+        return $this->send([
             'kind' => 'exception',
             // QueryException mesajı SQL'i bağlanmış değerlerle taşır; oturum
             // kimliği, e-posta, kart numarası oradan sızabilir.
-            'msg' => Scrubber::message($e->getMessage(), $this->sqlIceriyor($e)),
+            'msg' => Scrubber::message($e->getMessage(), $this->containsSql($e)),
             'exception_class' => $e::class,
             'stack' => Scrubber::stack($e->getTraceAsString()),
             'file' => Scrubber::path($e->getFile()),
@@ -123,11 +130,12 @@ class Recorder
      * Ortak alanları ekleyip gönderir.
      *
      * @param  array<string, mixed>  $event
+     * @return array{sent: bool, status?: int, error?: string}
      */
-    private function send(array $event): void
+    private function send(array $event): array
     {
         try {
-            $this->client->send(array_filter([
+            return $this->client->send(array_filter([
                 ...$event,
                 'env' => $this->config['env'],
                 'release' => $this->config['release'],
@@ -140,8 +148,10 @@ class Recorder
                 'framework_version' => app()->version(),
                 'user_id' => $this->userId(),
             ], fn ($v) => $v !== null));
-        } catch (Throwable) {
-            // Kendi hatasını raporlamaz — sonsuz döngü riski.
+        } catch (Throwable $e) {
+            // Kendi hatasını raporlamaz — sonsuz döngü riski. Sonuç yalnızca
+            // teşhis komutu için üretiliyor.
+            return ['sent' => false, 'error' => $e->getMessage()];
         }
     }
 
@@ -185,7 +195,7 @@ class Recorder
      * Mesajı SQL taşıyan istisnalar. Sınıf adına bakılıyor çünkü paket
      * illuminate/database'e bağımlı değil ve olmamalı.
      */
-    private function sqlIceriyor(Throwable $e): bool
+    private function containsSql(Throwable $e): bool
     {
         return str_contains($e::class, 'QueryException')
             || str_contains($e::class, 'PDOException');

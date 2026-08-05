@@ -25,7 +25,7 @@ class DurumCommand extends Command
     protected $description = 'Nabız kurulumunu denetler';
 
     /** Hub'ın ürettiği secret bu uzunlukta; farklıysa eksik kopyalanmıştır. */
-    private const SECRET_UZUNLUGU = 64;
+    private const SECRET_LENGTH = 64;
 
     /**
      * HubClient'a bilerek sorulmuyor: o singleton yapılandırmayı boot anında
@@ -37,20 +37,20 @@ class DurumCommand extends Command
         $secret = (string) config('nabiz.secret');
 
         $this->newLine();
-        $this->satir('Etkin', config('nabiz.enabled') ? 'evet' : 'HAYIR (NABIZ_ENABLED=false)');
-        $this->satir('Hub adresi', (string) config('nabiz.url') ?: 'TANIMSIZ');
-        $this->satir('Proje anahtarı', (string) config('nabiz.key') ?: 'TANIMSIZ');
-        $this->satir('Secret uzunluğu', $secret === '' ? 'TANIMSIZ' : strlen($secret).' karakter');
-        $this->satir('Ortam', (string) (config('nabiz.env') ?: app()->environment()));
+        $this->row('Etkin', config('nabiz.enabled') ? 'evet' : 'HAYIR (NABIZ_ENABLED=false)');
+        $this->row('Hub adresi', (string) config('nabiz.url') ?: 'TANIMSIZ');
+        $this->row('Proje anahtarı', (string) config('nabiz.key') ?: 'TANIMSIZ');
+        $this->row('Secret uzunluğu', $secret === '' ? 'TANIMSIZ' : strlen($secret).' karakter');
+        $this->row('Ortam', (string) (config('nabiz.env') ?: app()->environment()));
         $this->newLine();
 
-        $sorunlar = $this->sorunlar($secret);
+        $problems = $this->problems($secret);
 
-        foreach ($sorunlar as $sorun) {
-            $this->error('  ✗ '.$sorun);
+        foreach ($problems as $problem) {
+            $this->error('  ✗ '.$problem);
         }
 
-        if ($sorunlar !== []) {
+        if ($problems !== []) {
             $this->newLine();
 
             return self::FAILURE;
@@ -58,8 +58,8 @@ class DurumCommand extends Command
 
         $this->info('  ✓ Yapılandırma tamam.');
 
-        if ($this->option('test')) {
-            $this->sinamaGonder();
+        if ($this->option('test') && ! $this->sendProbe()) {
+            return self::FAILURE;
         }
 
         $this->newLine();
@@ -72,52 +72,71 @@ class DurumCommand extends Command
     }
 
     /** @return list<string> */
-    private function sorunlar(string $secret): array
+    private function problems(string $secret): array
     {
-        $sorunlar = [];
+        $problems = [];
 
         if (! config('nabiz.enabled')) {
-            $sorunlar[] = 'NABIZ_ENABLED=false — hiçbir kanca kurulmaz, hiçbir veri gönderilmez.';
+            $problems[] = 'NABIZ_ENABLED=false — hiçbir kanca kurulmaz, hiçbir veri gönderilmez.';
         }
 
-        $eksik = collect(['NABIZ_URL' => 'url', 'NABIZ_KEY' => 'key', 'NABIZ_SECRET' => 'secret'])
-            ->filter(fn (string $anahtar) => empty(config("nabiz.{$anahtar}")))
+        $missing = collect(['NABIZ_URL' => 'url', 'NABIZ_KEY' => 'key', 'NABIZ_SECRET' => 'secret'])
+            ->filter(fn (string $key) => empty(config("nabiz.{$key}")))
             ->keys();
 
-        if ($eksik->isNotEmpty()) {
-            $sorunlar[] = $eksik->implode(', ').' tanımlı değil.';
+        if ($missing->isNotEmpty()) {
+            $problems[] = $missing->implode(', ').' tanımlı değil.';
         }
 
-        if ($secret !== '' && strlen($secret) !== self::SECRET_UZUNLUGU) {
+        if ($secret !== '' && strlen($secret) !== self::SECRET_LENGTH) {
             // En sık hata bu: secret kopyalanırken başı veya sonu eksik
             // kalıyor ve sonuç sessizce hiçbir şey göndermemek oluyor.
-            $sorunlar[] = sprintf(
+            $problems[] = sprintf(
                 'NABIZ_SECRET %d karakter olmalı, %d karakter. Eksik kopyalanmış olabilir.',
-                self::SECRET_UZUNLUGU,
+                self::SECRET_LENGTH,
                 strlen($secret),
             );
         }
 
         if (str_starts_with((string) config('nabiz.url'), 'http://')) {
-            $sorunlar[] = 'NABIZ_URL http:// ile başlıyor — secret imzası şifresiz hat üzerinden gider.';
+            $problems[] = 'NABIZ_URL http:// ile başlıyor — secret imzası şifresiz hat üzerinden gider.';
         }
 
-        return $sorunlar;
+        return $problems;
     }
 
-    private function sinamaGonder(): void
+    /**
+     * Sonuç okunuyor, "gönderdim" varsayılmıyor.
+     *
+     * Önceden koşulsuz başarı yazılıyordu: ağ koptuysa, zaman aşımı olduysa ya
+     * da hub reddettiyse komut yine "✓ gönderildi" diyordu ve kuran kişi
+     * kurulumu çalışır sanıyordu. Gerçek bir kurulumda tam olarak bu yaşandı.
+     */
+    private function sendProbe(): bool
     {
         // Gerçek bir istisna raporlanır: hem taşıma hem de exception kancası
         // aynı anda sınanmış olur.
-        app(Recorder::class)->recordException(
+        $result = app(Recorder::class)->recordException(
             new RuntimeException('nabiz:durum --test ile üretilen sınama olayı')
         );
 
-        $this->info('  ✓ Sınama olayı gönderildi.');
+        if ($result['sent'] ?? false) {
+            $this->info(sprintf('  ✓ Sınama olayı gönderildi (HTTP %s).', $result['status'] ?? '?'));
+
+            return true;
+        }
+
+        $this->error(sprintf(
+            '  ✗ Sınama olayı GÖNDERİLEMEDİ: %s',
+            $result['error'] ?? 'HTTP '.($result['status'] ?? 'bilinmiyor'),
+        ));
+        $this->newLine();
+
+        return false;
     }
 
-    private function satir(string $etiket, string $deger): void
+    private function row(string $label, string $value): void
     {
-        $this->line(sprintf('  %-18s %s', $etiket, $deger));
+        $this->line(sprintf('  %-18s %s', $label, $value));
     }
 }
