@@ -62,7 +62,7 @@ geçerli ile geçersiz imzayı dışarıya aynı yanıtla karşılar.
 
 | Alan | Örnek |
 |---|---|
-| `kind` | `exception` · `http_5xx` · `slow_request` · `slow_query` · `job_failed` |
+| `kind` | `exception` · **`fatal`** · `http_5xx` · `slow_request` · `slow_query` · `job_failed` |
 | `msg`, `exception_class`, `stack`, `file`, `line` | Hata bilgisi (maskelemeden geçer) |
 | `route` | `GET /api/products/{id}` — **desen, gerçek id değil** |
 | `controller`, `method`, `status` | `ProductController@show`, `GET`, `500` |
@@ -70,6 +70,71 @@ geçerli ile geçersiz imzayı dışarıya aynı yanıtla karşılar.
 | `query_count` | SQL sorgu sayısı — N+1 tespiti |
 | `slowest_query_sql` | **Normalize:** `select * from users where email = ?` |
 | `release`, `php_version`, `framework_version` | Ortam |
+
+### Ölümcül hatalar ayrı bir tür
+
+Bellek tükenmesi, zaman aşımı ve derleme hataları PHP'de **exception üretmez**: süreç ölür,
+exception handler hiç çalışmaz. Yani siteyi gerçekten düşüren hata sınıfı, yalnızca
+`hookExceptions()` ile izlendiğinde tamamen görünmez kalıyordu — uptime probu 500'ü görür
+ama sebebini kimse bilmez.
+
+`register_shutdown_function` ile yakalanıp `fatal` türüyle gönderilir. `exception` olarak
+gönderilmedi çünkü ikisi farklı şeyler: exception uygulamanın yakalayabildiği bir durum,
+fatal ise sunucunun sınırına çarpması — ve bu sınıfı ayrıca süzebilmek gerekiyor.
+
+Bellek tükendiğinde raporlama kodunun kendisi de yer bulamaz; bu yüzden açılışta 256 KB'lık
+bir tampon ayrılıp shutdown anında serbest bırakılır. Tampon olmadan kanca yazılır ama tam
+ihtiyaç anında sessizce çalışmaz.
+
+Yalnızca ölümcül türler (`E_ERROR`, `E_PARSE`, `E_CORE_ERROR`, `E_COMPILE_ERROR`,
+`E_USER_ERROR`) gönderilir. Uyarı ve bildirimler her istekte onlarca üretilebilir ve paneli
+boğardı.
+
+---
+
+## Canlılık nabzı
+
+Paket sekiz saatte bir hub'a **olay taşımayan** küçük bir istek gönderir.
+
+Sebebi şu: hub bir kurulumun çalışıp çalışmadığını yalnızca gelen hatalardan
+anlıyordu. Sonuç ters dönüyordu — hatasız çalışan bir uygulama hiç olay
+göndermediği için "kurulum çalışmıyor olabilir" diye raporlanıyordu. Sağlıklı
+olmak cezalandırılıyordu.
+
+Artık kanıt isteğin kendisi. Nabız geldiği sürece hub kurulumun ayakta
+olduğunu bilir; gelmediğinde söylediği şey gerçekten doğrudur.
+
+| | |
+|---|---|
+| Aralık | 8 saat |
+| Gövde | `{"events": []}` — hiçbir ölçüm taşımaz |
+| Uç | Olayların gittiği uçla aynı, ek bir adres yok |
+| Tetikleyen | HTTP isteği (aşağıya bakın) |
+
+Aralık, hub'ın 24 saatlik sessizlik eşiğinin üçte biri. Eşitlenseydi tek bir
+kaçırılan istek — deploy, kısa bir kesinti — kurulumu bozuk gösterirdi.
+
+### Neden zamanlayıcıya bağlı değil
+
+Nabız `terminate()` aşamasında, yani **yanıt kullanıcıya gönderildikten
+sonra** atılır. Süresi gelmemişse yalnızca bir önbellek okuması yapılır;
+kullanıcı hiçbir şey beklemez.
+
+Laravel'in zamanlayıcısı kullanılmadı çünkü paket onlarca projeye kuruluyor
+ve hepsinde çalışan bir cron olduğu varsayılamaz. Zamanlayıcısı olmayan bir
+projede nabız hiç atmaz ve kurulum sessizce "bozuk" görünürdü — düzeltmeye
+çalıştığı hatanın aynısı.
+
+İsteğe bağlamanın ikinci faydası: **hub'ın kendi uptime probu da bir
+istektir.** Hiç ziyaretçisi olmayan bir site bile prob sayesinde nabzını
+atmaya devam eder.
+
+Önbellek anahtarı proje anahtarıyla ayrılır; aynı cache deposunu paylaşan iki
+uygulama birbirinin nabzını bastırmaz.
+
+`NABIZ_ENABLED=false` iken ya da yapılandırma eksikken hiç gönderilmez.
+
+---
 
 ## Ne toplamaz
 

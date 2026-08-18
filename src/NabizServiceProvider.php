@@ -4,6 +4,7 @@ namespace Allturko\Nabiz;
 
 use Allturko\Nabiz\Console\DurumCommand;
 use Allturko\Nabiz\Http\Middleware\MeasureRequest;
+use Allturko\Nabiz\Recorder;
 use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
@@ -67,6 +68,53 @@ class NabizServiceProvider extends ServiceProvider
         $this->hookQueries();
         $this->hookExceptions();
         $this->hookRequests();
+        $this->hookFatals();
+    }
+
+    /**
+     * Ölümcül hatalar — istisna mekanizmasından geçmeyenler.
+     *
+     * Bellek tükenmesi, zaman aşımı ve derleme hataları PHP'de exception
+     * üretmez: süreç ölür, `hookExceptions()` hiç çalışmaz. Yani siteyi
+     * **gerçekten düşüren** hata sınıfı bugüne kadar panele hiç düşmedi.
+     * Uptime probu 500'ü görüyordu ama sebebini kimse bilmiyordu.
+     */
+    private function hookFatals(): void
+    {
+        /*
+        | Bellek tamponu. Bellek tükendiğinde raporlama kodunun kendisi de
+        | yer bulamaz — kanca yazılır ama tam ihtiyaç anında sessizce
+        | çalışmaz. Açılışta ayrılan bu blok, shutdown anında serbest
+        | bırakılıp gönderime nefes aldırıyor.
+        */
+        $reserve = str_repeat(' ', 256 * 1024);
+
+        register_shutdown_function(function () use (&$reserve) {
+            $reserve = null;
+
+            $error = error_get_last();
+
+            if ($error === null) {
+                return;
+            }
+
+            /*
+            | Yalnızca ölümcül türler. Uyarı ve bildirim (E_WARNING,
+            | E_NOTICE, E_DEPRECATED) buraya girmez: her istekte onlarca
+            | üretilebilir ve paneli tamamen boğardı.
+            */
+            $fatal = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
+
+            if (($error['type'] & $fatal) === 0) {
+                return;
+            }
+
+            try {
+                $this->app->make(Recorder::class)->recordFatal($error);
+            } catch (Throwable) {
+                // Ölmekte olan süreçte bile uygulamayı etkilemez.
+            }
+        });
     }
 
     /** Yavaş sorgu ve sorgu sayacı. */

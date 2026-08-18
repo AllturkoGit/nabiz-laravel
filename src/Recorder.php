@@ -136,6 +136,53 @@ class Recorder
     private const HEARTBEAT_HOURS = 8;
 
     /**
+     * Ölümcül hata — istisna mekanizmasından geçmeyen ölüm.
+     *
+     * `error_get_last()` çıktısı beklenir. Stack trace yoktur: süreç zaten
+     * ölmüş, `debug_backtrace()` çağrılabilecek bir bağlam kalmamıştır.
+     * Elde olan dosya, satır ve mesajdır — ki bellek hatasında mesaj
+     * genellikle limiti ve ayrılmaya çalışılan boyutu taşır, yani en
+     * değerli bilgi zaten oradadır.
+     *
+     * @param  array{type: int, message: string, file: string, line: int}  $error
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function recordFatal(array $error): array
+    {
+        return $this->send([
+            'kind' => 'fatal',
+            /*
+            | Mesaj temizlikten geçer: bellek hatası dosya yollarını,
+            | zaman aşımı ise çalışan sorguyu taşıyabiliyor.
+            */
+            'msg' => Scrubber::message($this->fatalLabel($error['type']).': '.$error['message'], true),
+            'file' => Scrubber::path($error['file'] ?? null),
+            'line' => $error['line'] ?? null,
+            // Ölüm anındaki bellek: limite mi çarpıldı, yoksa başka bir
+            // sebeple mi ölündü — ayrımı bu sayı veriyor.
+            'memory_mb' => (int) round(memory_get_peak_usage(true) / 1048576),
+        ]);
+    }
+
+    /**
+     * Ölümcül hata türünün okunur adı.
+     *
+     * Ham sayı (`1`, `64`) panelde hiçbir şey ifade etmiyor; hangi sınıf
+     * hatanın olduğu mesajın başında yazılı olmalı.
+     */
+    private function fatalLabel(int $type): string
+    {
+        return match ($type) {
+            E_ERROR => 'Ölümcül hata',
+            E_PARSE => 'Sözdizimi hatası',
+            E_CORE_ERROR => 'Çekirdek hatası',
+            E_COMPILE_ERROR => 'Derleme hatası',
+            E_USER_ERROR => 'Uygulama hatası',
+            default => 'Ölümcül hata',
+        };
+    }
+
+    /**
      * "Buradayım" — olay taşımayan canlılık isteği.
      *
      * Hub bir kurulumun çalıştığını yalnızca hata gelmesinden anlıyordu ve
