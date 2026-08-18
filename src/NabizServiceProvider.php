@@ -4,7 +4,6 @@ namespace Allturko\Nabiz;
 
 use Allturko\Nabiz\Console\DurumCommand;
 use Allturko\Nabiz\Http\Middleware\MeasureRequest;
-use Allturko\Nabiz\Recorder;
 use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
