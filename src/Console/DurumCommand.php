@@ -20,7 +20,9 @@ use RuntimeException;
  */
 class DurumCommand extends Command
 {
-    protected $signature = 'nabiz:durum {--test : Hub\'a bir sınama olayı gönderir}';
+    protected $signature = 'nabiz:durum
+                            {--test : Hub\'a sınama olayı gönderir — panelde hata olarak görünür}
+                            {--nabiz : Yalnızca canlılık isteği gönderir — panele hata düşürmez}';
 
     protected $description = 'Nabız kurulumunu denetler';
 
@@ -37,6 +39,12 @@ class DurumCommand extends Command
         $secret = (string) config('nabiz.secret');
 
         $this->newLine();
+        /*
+        | Sürüm en üstte: "güncelleme geçti mi" sorusunun cevabı bu ve
+        | onlarca kurulumda en sık sorulan şey o. Yapılandırma doğru olsa
+        | bile eski sürüm eski davranışı sürdürür.
+        */
+        $this->row('Paket sürümü', Recorder::version());
         $this->row('Etkin', config('nabiz.enabled') ? 'evet' : 'HAYIR (NABIZ_ENABLED=false)');
         $this->row('Hub adresi', (string) config('nabiz.url') ?: 'TANIMSIZ');
         $this->row('Proje anahtarı', (string) config('nabiz.key') ?: 'TANIMSIZ');
@@ -59,6 +67,10 @@ class DurumCommand extends Command
         $this->info('  ✓ Yapılandırma tamam.');
 
         if ($this->option('test') && ! $this->sendProbe()) {
+            return self::FAILURE;
+        }
+
+        if ($this->option('nabiz') && ! $this->sendHeartbeat()) {
             return self::FAILURE;
         }
 
@@ -112,6 +124,36 @@ class DurumCommand extends Command
      * da hub reddettiyse komut yine "✓ gönderildi" diyordu ve kuran kişi
      * kurulumu çalışır sanıyordu. Gerçek bir kurulumda tam olarak bu yaşandı.
      */
+    /**
+     * Canlılık isteği — bağlantıyı panele hata düşürmeden sınar.
+     *
+     * `--test` gerçek bir istisna gönderiyor ve bu tek kurulumu doğrularken
+     * doğru: taşıma ve exception kancası birlikte sınanmış oluyor. Ama
+     * onlarca kurulumu tek tek gezen bir döngüde aynı şey panele onlarca
+     * sahte hata bırakır — izleme aracının kendi gürültüsünü üretmesi.
+     *
+     * Nabız bunu kirletmeden yapıyor: olay taşımıyor ama kabul edildiğinde
+     * projenin bağlantı durumunu tazeliyor.
+     */
+    private function sendHeartbeat(): bool
+    {
+        $result = app(Recorder::class)->heartbeat();
+
+        if ($result['sent'] ?? false) {
+            $this->info(sprintf('  ✓ Canlılık isteği gönderildi (HTTP %s).', $result['status'] ?? '?'));
+
+            return true;
+        }
+
+        $this->error(sprintf(
+            '  ✗ Canlılık isteği GÖNDERİLEMEDİ: %s',
+            $result['error'] ?? 'HTTP '.($result['status'] ?? 'bilinmiyor'),
+        ));
+        $this->newLine();
+
+        return false;
+    }
+
     private function sendProbe(): bool
     {
         // Gerçek bir istisna raporlanır: hem taşıma hem de exception kancası

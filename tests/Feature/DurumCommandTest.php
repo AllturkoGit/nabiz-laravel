@@ -1,5 +1,6 @@
 <?php
 
+use Allturko\Nabiz\Recorder;
 use Allturko\Nabiz\Transport\HubClient;
 
 /**
@@ -105,4 +106,59 @@ test('gönderim başarılıysa durum kodu yazılır', function () {
     $this->artisan('nabiz:durum --test')
         ->expectsOutputToContain('HTTP 204')
         ->assertSuccessful();
+});
+
+/**
+ * "Güncelleme geçti mi" sorusunun cevabı bu satır. Yapılandırma doğru olsa
+ * bile eski sürüm eski davranışı sürdürür ve onlarca kurulumda tek tek
+ * sunucuya girmeden bunu bilmenin başka yolu yok.
+ */
+test('kurulu paket sürümü yazdırılır', function () {
+    config()->set('nabiz.url', 'https://hub.ornek');
+    config()->set('nabiz.key', 'ornek-proje');
+    config()->set('nabiz.secret', str_repeat('a', 64));
+
+    $this->artisan('nabiz:durum')
+        ->expectsOutputToContain('Paket sürümü')
+        ->assertSuccessful();
+});
+
+/**
+ * Onlarca kurulumu gezen bir döngüde `--test` panele onlarca sahte hata
+ * bırakırdı — izleme aracının kendi gürültüsünü üretmesi. Nabız aynı şeyi
+ * kirletmeden kanıtlıyor.
+ */
+test('nabiz seçeneği hata değil canlılık gönderir', function () {
+    config()->set('nabiz.url', 'https://hub.ornek');
+    config()->set('nabiz.key', 'ornek-proje');
+    config()->set('nabiz.secret', str_repeat('a', 64));
+
+    $gonderilenler = [];
+
+    app()->instance(Recorder::class, new Recorder(
+        new class($gonderilenler) extends HubClient
+        {
+            public function __construct(public array &$gonderilenler)
+            {
+                parent::__construct('https://x.test', 'k', str_repeat('s', 64), 1);
+            }
+
+            public function send(array $payload): array
+            {
+                $this->gonderilenler[] = $payload;
+
+                return ['sent' => true, 'status' => 204];
+            }
+        },
+        ['key' => 'k', 'env' => 'testing', 'release' => null,
+            'slow_request_ms' => 1000, 'slow_query_ms' => 500,
+            'capture_user_id' => false, 'ignore' => []],
+    ));
+
+    $this->artisan('nabiz:durum --nabiz')->assertSuccessful();
+
+    expect($gonderilenler)->toHaveCount(1)
+        // Olay taşımaz: panelde hata kaydı oluşmaz.
+        ->and($gonderilenler[0]['events'])->toBe([])
+        ->and($gonderilenler[0])->not->toHaveKey('kind');
 });

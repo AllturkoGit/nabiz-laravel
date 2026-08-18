@@ -4,6 +4,7 @@ namespace Allturko\Nabiz;
 
 use Allturko\Nabiz\Support\Scrubber;
 use Allturko\Nabiz\Transport\HubClient;
+use Composer\InstalledVersions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\HttpFoundation\Response;
@@ -128,6 +129,26 @@ class Recorder
     }
 
     /**
+     * Kurulu paket sürümü.
+     *
+     * Composer 2'nin çalışma zamanı API'sinden okunuyor; ayrıca elle
+     * güncellenen bir sabit tutmak, sürüm atlandığında sessizce yanlış bilgi
+     * vermek demekti.
+     */
+    public static function version(): string
+    {
+        try {
+            if (class_exists(InstalledVersions::class)) {
+                return (string) InstalledVersions::getPrettyVersion('allturko/nabiz');
+            }
+        } catch (Throwable) {
+            // Sürüm okunamadıysa raporlama durmaz.
+        }
+
+        return 'bilinmiyor';
+    }
+
+    /**
      * Canlılık aralığı — hub'ın sessizlik eşiğinin (24 saat) üçte biri.
      *
      * Aralık eşiğe eşit olsaydı tek bir kaçırılan istek — deploy, yeniden
@@ -240,6 +261,12 @@ class Recorder
                 'slowest_query_sql' => $event['slowest_query_sql']
                     ?? Scrubber::sql($this->slowestQuerySql),
                 'php_version' => PHP_VERSION,
+                /*
+                | Hangi projenin eski SDK sürümünde kaldığı, ancak olayla
+                | birlikte gelirse görülebiliyor. Onlarca kurulumda tek tek
+                | sunucuya girmeden bilmenin başka yolu yok.
+                */
+                'sdk_version' => self::version(),
                 'framework_version' => app()->version(),
                 'user_id' => $this->userId(),
             ], fn ($v) => $v !== null));
