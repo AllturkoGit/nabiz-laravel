@@ -5,6 +5,7 @@ namespace Allturko\Nabiz;
 use Allturko\Nabiz\Support\Scrubber;
 use Allturko\Nabiz\Transport\HubClient;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
@@ -124,6 +125,53 @@ class Recorder
             'duration_ms' => (int) round($durationMs),
             'memory_mb' => (int) round(memory_get_peak_usage(true) / 1048576),
         ]);
+    }
+
+    /**
+     * Canlılık aralığı — hub'ın sessizlik eşiğinin (24 saat) üçte biri.
+     *
+     * Aralık eşiğe eşit olsaydı tek bir kaçırılan istek — deploy, yeniden
+     * başlatma, kısa bir ağ kesintisi — kurulumu bozuk gösterirdi.
+     */
+    private const HEARTBEAT_HOURS = 8;
+
+    /**
+     * "Buradayım" — olay taşımayan canlılık isteği.
+     *
+     * Hub bir kurulumun çalıştığını yalnızca hata gelmesinden anlıyordu ve
+     * sonuç ters dönüyordu: hatasız çalışan uygulama "kurulum bozuk"
+     * görünüyordu. Artık kanıt isteğin kendisi.
+     *
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function heartbeat(): array
+    {
+        return $this->send(['events' => []]);
+    }
+
+    /**
+     * Süresi geldiyse canlılık gönderir.
+     *
+     * **Zamanlayıcıya bağlanmadı, isteğe bağlandı.** Gerekçe: paket onlarca
+     * projeye kuruluyor ve hepsinde çalışan bir cron olduğu varsayılamaz.
+     * Zamanlayıcısı olmayan bir projede nabız hiç atmaz ve kurulum sessizce
+     * "bozuk" görünür — düzeltmeye çalıştığımız hatanın aynısı.
+     *
+     * İsteğe bağlamanın ikinci faydası: hub'ın kendi uptime probu da bir
+     * istektir. Hiç ziyaretçisi olmayan bir site bile prob sayesinde nabzını
+     * atmaya devam eder.
+     */
+    public function heartbeatIfDue(): void
+    {
+        $key = 'nabiz:heartbeat:'.($this->config['key'] ?? 'bilinmeyen');
+
+        // add(): yalnızca anahtar yoksa yazar ve true döner — yarış koşulunda
+        // iki eşzamanlı istek iki nabız göndermesin.
+        if (! Cache::add($key, true, now()->addHours(self::HEARTBEAT_HOURS))) {
+            return;
+        }
+
+        $this->heartbeat();
     }
 
     /**

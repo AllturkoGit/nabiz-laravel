@@ -37,6 +37,16 @@ class MeasureRequest
     {
         try {
             $this->recorder->recordRequest($request, $response);
+
+            /*
+            | Canlılık nabzı da burada: yanıt gönderildikten sonra, kimseyi
+            | bekletmeden. Sekiz saatte bir gerçekten istek atar, aradaki her
+            | çağrıda yalnızca bir önbellek okuması yapar.
+            |
+            | Zamanlayıcı yerine isteğe bağlı olmasının gerekçesi
+            | Recorder::heartbeatIfDue() içinde.
+            */
+            $this->recorder->heartbeatIfDue();
         } catch (Throwable) {
             // Paket kendi hatasıyla uygulamayı etkilemez.
         }

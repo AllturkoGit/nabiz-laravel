@@ -29,6 +29,10 @@ class NabizServiceProvider extends ServiceProvider
         $this->app->singleton(Recorder::class, fn ($app) => new Recorder(
             client: $app->make(HubClient::class),
             config: [
+                // Canlılık önbelleği proje bazlı anahtarlanıyor; aynı cache
+                // deposunu paylaşan iki uygulama birbirinin nabzını
+                // bastırmasın.
+                'key' => config('nabiz.key'),
                 'env' => config('nabiz.env') ?: $app->environment(),
                 'release' => config('nabiz.release'),
                 'slow_request_ms' => config('nabiz.slow_request_ms'),
