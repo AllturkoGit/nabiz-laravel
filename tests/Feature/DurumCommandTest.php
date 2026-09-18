@@ -78,6 +78,8 @@ test('gönderim başarısızsa test komutu başarısız döner', function () {
             return ['sent' => false, 'error' => 'Could not resolve host'];
         }
     });
+    // Recorder açılışta çözülüyor; sahte istemciyi görsün.
+    app()->forgetInstance(Recorder::class);
 
     $this->artisan('nabiz:durum --test')
         ->expectsOutputToContain('GÖNDERİLEMEDİ')
@@ -102,6 +104,8 @@ test('gönderim başarılıysa durum kodu yazılır', function () {
             return ['sent' => true, 'status' => 204];
         }
     });
+    // Recorder açılışta çözülüyor; sahte istemciyi görsün.
+    app()->forgetInstance(Recorder::class);
 
     $this->artisan('nabiz:durum --test')
         ->expectsOutputToContain('HTTP 204')
@@ -161,4 +165,24 @@ test('nabiz seçeneği hata değil canlılık gönderir', function () {
         // Olay taşımaz: panelde hata kaydı oluşmaz.
         ->and($gonderilenler[0]['events'])->toBe([])
         ->and($gonderilenler[0])->not->toHaveKey('kind');
+});
+
+/*
+| Hub küme dışı ortamı canlılık dahil sessizce atıyor. Komut bunu söylemezse
+| kurulum "tamam" görünür ama panele hiçbir şey düşmez.
+*/
+test('tanınmayan ortamda komut hata verir', function () {
+    config(['nabiz.env' => 'qa-eu']);
+
+    $this->artisan('nabiz:durum')
+        ->expectsOutputToContain('kabul edilmez')
+        ->assertFailed();
+});
+
+test('takma ad ortam kabul edilir ve karşılığıyla gösterilir', function () {
+    config(['nabiz.env' => 'prod']);
+
+    $this->artisan('nabiz:durum')
+        ->expectsOutputToContain('production (prod)')
+        ->assertSuccessful();
 });

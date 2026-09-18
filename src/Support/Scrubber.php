@@ -20,9 +20,11 @@ class Scrubber
     private const PATTERNS = [
         '/[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.\p{L}{2,}/u' => '[eposta]',
         '/\bTR(?:[\s-]?\d){24}\b/i' => '[iban]',
+        // Aday; karar isCard'da — dosya adındaki zaman damgası kart sanılmasın.
         '/\b\d(?:[\s-]?\d){12,18}\b/' => '[kart]',
         '/\b[1-9]\d{10}\b/' => '[tckn]',
-        '/(?:\+90|0)?[\s-]?5\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b/' => '[telefon]',
+        // Önünde rakam olamaz: `1795123456789` damgası `179[telefon]` oluyordu.
+        '/(?<!\d)(?:\+?90|0)?[\s-]?5\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b/' => '[telefon]',
 
         /*
         | Uzun rastgele diziler: oturum kimliği, API anahtarı, jeton, hash.
@@ -39,17 +41,89 @@ class Scrubber
         '/[A-Za-z0-9][A-Za-z0-9_\-]{23,}/' => '[jeton]',
     ];
 
+    /*
+    | Bu iki desen aday bulur, karar isCard/isToken'da. Kurallar hub ve öbür
+    | SDK'larla birebir aynı; ayrışırsa parmak izi bölünür.
+    */
+    private const CHECKED = ['[kart]' => 'isCard', '[jeton]' => 'isToken'];
+
     public static function text(?string $value, int $limit): ?string
     {
         if ($value === null || $value === '') {
             return null;
         }
 
+        /*
+        | Önce UTF-8 onarılır. Eposta deseni `/u` bayraklı; geçersiz baytta
+        | preg_replace null dönüyor, `?? $value` ile desen sessizce
+        | atlanıyor ve adres maskelenmeden gidiyordu (latin1 veritabanı
+        | hatasında gerçekleşebilir).
+        */
+        $value = mb_scrub($value, 'UTF-8');
+
         foreach (self::PATTERNS as $pattern => $replacement) {
-            $value = preg_replace($pattern, $replacement, $value) ?? $value;
+            $check = self::CHECKED[$replacement] ?? null;
+
+            $value = ($check === null
+                ? preg_replace($pattern, $replacement, $value)
+                : preg_replace_callback(
+                    $pattern,
+                    fn (array $m) => self::$check($m[0]) ? $replacement : $m[0],
+                    $value,
+                )) ?? $value;
         }
 
         return mb_substr($value, 0, $limit);
+    }
+
+    /**
+     * Gerçek kart numarası: 2-9 ile başlar ve Luhn'dan geçer. Zaman damgası
+     * (1 ile başlar) kart sanılmaz; her gerçek kart Luhn'u geçer.
+     */
+    private static function isCard(string $candidate): bool
+    {
+        $digits = preg_replace('/\D/', '', $candidate) ?? '';
+
+        if ($digits === '' || $digits[0] < '2') {
+            return false;
+        }
+
+        $sum = 0;
+        $double = false;
+
+        for ($i = strlen($digits) - 1; $i >= 0; $i--) {
+            $d = (int) $digits[$i];
+
+            if ($double) {
+                $d *= 2;
+                if ($d > 9) {
+                    $d -= 9;
+                }
+            }
+
+            $sum += $d;
+            $double = ! $double;
+        }
+
+        return $sum % 10 === 0;
+    }
+
+    /**
+     * Rastgele dizi: 16+ karakterlik bölünmemiş parça ya da harf içeren hex
+     * (UUID, hash). Tireyle birleşmiş kısa parçalar okunur addır.
+     */
+    private static function isToken(string $candidate): bool
+    {
+        $parts = preg_split('/[-_]/', $candidate) ?: [];
+
+        if (max(array_map('strlen', $parts)) >= 16) {
+            return true;
+        }
+
+        $compact = str_replace(['-', '_'], '', $candidate);
+
+        return preg_match('/^[0-9a-f]+$/i', $compact) === 1
+            && preg_match('/[a-f]/i', $compact) === 1;
     }
 
     /** Query string ve fragment atılır; yalnızca yol kalır. */

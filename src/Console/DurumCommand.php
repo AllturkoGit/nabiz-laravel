@@ -3,6 +3,9 @@
 namespace Allturko\Nabiz\Console;
 
 use Allturko\Nabiz\Recorder;
+use Allturko\Nabiz\Support\Environment;
+use Allturko\Nabiz\Support\Packagist;
+use Allturko\Nabiz\Support\Release;
 use Illuminate\Console\Command;
 use RuntimeException;
 
@@ -45,11 +48,16 @@ class DurumCommand extends Command
         | bile eski sürüm eski davranışı sürdürür.
         */
         $this->row('Paket sürümü', Recorder::version());
+        $this->updateCheck();
         $this->row('Etkin', config('nabiz.enabled') ? 'evet' : 'HAYIR (NABIZ_ENABLED=false)');
         $this->row('Hub adresi', (string) config('nabiz.url') ?: 'TANIMSIZ');
         $this->row('Proje anahtarı', (string) config('nabiz.key') ?: 'TANIMSIZ');
         $this->row('Secret uzunluğu', $secret === '' ? 'TANIMSIZ' : strlen($secret).' karakter');
-        $this->row('Ortam', (string) (config('nabiz.env') ?: app()->environment()));
+        $envRaw = (string) (config('nabiz.env') ?: app()->environment());
+        $envName = Environment::normalize($envRaw);
+        $this->row('Ortam', $envName === $envRaw ? $envName : "{$envName} ({$envRaw})");
+        $release = Release::detect(base_path(), config('nabiz.release'));
+        $this->row('Sürüm etiketi', sprintf('%s (kaynak: %s)', $release['value'] ?? 'tanımsız', $release['source']));
         $this->newLine();
 
         $problems = $this->problems($secret);
@@ -90,6 +98,12 @@ class DurumCommand extends Command
 
         if (! config('nabiz.enabled')) {
             $problems[] = 'NABIZ_ENABLED=false — hiçbir kanca kurulmaz, hiçbir veri gönderilmez.';
+        }
+
+        $envRaw = (string) (config('nabiz.env') ?: app()->environment());
+
+        if (! Environment::accepted(Environment::normalize($envRaw))) {
+            $problems[] = "Ortam \"{$envRaw}\" hub tarafından kabul edilmez — olaylar ve canlılık sessizce reddedilir. NABIZ_ENV=production, staging ya da local yazın.";
         }
 
         $missing = collect(['NABIZ_URL' => 'url', 'NABIZ_KEY' => 'key', 'NABIZ_SECRET' => 'secret'])
@@ -177,8 +191,42 @@ class DurumCommand extends Command
         return false;
     }
 
+    /**
+     * Packagist'teki en yeni sürüm. Yalnızca bilgi: eski sürüm bir
+     * yapılandırma hatası değil, çıkış kodu değişmez.
+     *
+     * `NABIZ_DURUM_CEVRIMDISI=1` denetimi atlar (ağsız sunucu, CI).
+     */
+    private function updateCheck(): void
+    {
+        $offline = getenv('NABIZ_DURUM_CEVRIMDISI') ?: ($_SERVER['NABIZ_DURUM_CEVRIMDISI'] ?? $_ENV['NABIZ_DURUM_CEVRIMDISI'] ?? '');
+
+        if (in_array(strtolower(trim((string) $offline)), ['1', 'true', 'yes', 'on', 'evet'], true)) {
+            return;
+        }
+
+        $packagist = app(Packagist::class);
+        $latest = $packagist->latestStable();
+
+        if ($latest === null) {
+            $this->row('Güncel sürüm', 'denetlenemedi');
+
+            return;
+        }
+
+        $this->row('Güncel sürüm', $latest);
+
+        // Kurulu sürüm bilinmiyorsa ya da dev dalıysa karşılaştırılmaz.
+        $installed = Packagist::stable($packagist->installed());
+
+        if ($installed !== null && Packagist::compare($latest, $installed) > 0) {
+            $this->warn('  ! Güncelleme var: composer require allturko/nabiz:'.Packagist::constraint($latest));
+        }
+    }
+
     private function row(string $label, string $value): void
     {
-        $this->line(sprintf('  %-18s %s', $label, $value));
+        // sprintf bayt sayıyor; Türkçe harfli etiketler kayıyordu.
+        $this->line('  '.$label.str_repeat(' ', max(1, 19 - mb_strlen($label))).$value);
     }
 }

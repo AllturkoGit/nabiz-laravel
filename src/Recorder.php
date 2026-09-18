@@ -5,9 +5,11 @@ namespace Allturko\Nabiz;
 use Allturko\Nabiz\Support\Scrubber;
 use Allturko\Nabiz\Transport\HubClient;
 use Composer\InstalledVersions;
+use Illuminate\Database\RecordsNotFoundException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
 
 /**
@@ -24,8 +26,24 @@ class Recorder
 
     private ?string $slowestQuerySql = null;
 
-    /** Aynı istekte aynı exception iki kez raporlanmasın. */
-    private array $reported = [];
+    /**
+     * Aynı exception iki kez raporlanmasın.
+     *
+     * WeakMap: eskiden `spl_object_id` dizisiydi. Nesne kimliği çöp
+     * toplanınca yeniden kullanılıyor ve dizi hiç temizlenmiyordu — uzun
+     * ömürlü süreçte (kuyruk işçisi, Octane) aynı kimliği alan YENİ bir
+     * hata "zaten raporlandı" diye sessizce yutuluyor, dizi de büyüyordu.
+     *
+     * @var \WeakMap<Throwable, true>
+     */
+    private \WeakMap $reported;
+
+    /*
+    | Hata raporlandıysa istek işaretlenir; istek bitiminde aynı istek için
+    | ayrıca stack'siz bir "HTTP 500" açılmaz. Node SDK'daki işaretin
+    | karşılığı (nabiz.reported).
+    */
+    private const REPORTED_ATTRIBUTE = 'nabiz.reported';
 
     /**
      * İstek başlangıcı. Middleware'de DEĞİL burada tutuluyor: Laravel
@@ -40,13 +58,58 @@ class Recorder
     public function __construct(
         private readonly HubClient $client,
         private readonly array $config,
-    ) {}
+    ) {
+        $this->reported = new \WeakMap;
+    }
+
+    /**
+     * İstek bitimini bekleyen olaylar (gövdesi hazır).
+     *
+     * Hata ve yavaş sorgu gönderimi eskiden anında yapılıyordu: `report()`
+     * yanıttan ÖNCE çalışıyor, hub yavaşsa kullanıcı zaman aşımı kadar
+     * (en çok 10 sn) bekliyordu. Ölçülen bir HTTP isteğinde olay burada
+     * bekler, terminate'te — yanıt gittikten sonra — gönderilir.
+     *
+     * @var list<array<string, mixed>>
+     */
+    private array $pending = [];
+
+    /** terminate aşaması: artık ertelemek yok, doğrudan gönder. */
+    private bool $terminating = false;
+
+    private bool $shutdownRegistered = false;
+
+    /** Canlılık önbelleğine en son bakılan an; kuyruk döngüsünü seyreltir. */
+    private ?float $heartbeatCheckedAt = null;
 
     /** Middleware'in handle aşamasında çağrılır. */
     public function startRequest(float $at): void
     {
         // İlk çağrı kazanır: alt istekler (Route::dispatch) başlangıcı ezmesin.
         $this->startedAt ??= $at;
+    }
+
+    /**
+     * İstek/iş başına durumu sıfırlar.
+     *
+     * İstek bitiminde (terminate) ve kuyruk işi başlarken (JobProcessing)
+     * çağrılır. FPM'de her süreç tek istek görür ve bu hiç gerekmiyordu.
+     * Octane ve kuyruk işçisinde Recorder yüzlerce istek/iş boyunca yaşıyor: başlangıç
+     * zamanı ilk isteğe yapışıyor (`??=`), sorgu sayacı ve en yavaş sorgu
+     * işler arasında birikiyordu.
+     */
+    public function reset(): void
+    {
+        $this->startedAt = null;
+        $this->queryCount = 0;
+        $this->slowestQueryMs = null;
+        $this->slowestQuerySql = null;
+    }
+
+    /** Octane işçisi mi. Octane sunucuyu başlatırken bu değişkeni koyuyor. */
+    public static function octane(): bool
+    {
+        return (bool) ($_SERVER['LARAVEL_OCTANE'] ?? $_ENV['LARAVEL_OCTANE'] ?? getenv('LARAVEL_OCTANE'));
     }
 
     /** DB::listen kancasından çağrılır. */
@@ -76,13 +139,16 @@ class Recorder
      */
     public function recordException(Throwable $e): array
     {
-        if ($this->ignored($e)) {
+        if ($this->ignored($e) || $this->clientError($e)) {
             return ['sent' => false, 'error' => 'yok-sayildi'];
         }
 
         if ($this->alreadyReported($e)) {
             return ['sent' => false, 'error' => 'zaten-raporlandi'];
         }
+
+        $request = $this->currentRequest();
+        $request?->attributes->set(self::REPORTED_ATTRIBUTE, true);
 
         return $this->send([
             'kind' => 'exception',
@@ -93,6 +159,92 @@ class Recorder
             'stack' => Scrubber::stack($e->getTraceAsString()),
             'file' => Scrubber::path($e->getFile()),
             'line' => $e->getLine(),
+            /*
+            | Rota ve yöntem eskiden hiç gönderilmiyordu: panelde hatanın
+            | hangi uçta patladığı görünmüyor, "Yol" `/` kalıyordu. Desen
+            | gönderilir (`/api/urunler/{id}`), gerçek id değil.
+            */
+            'route' => $request ? $this->routePath($request) : null,
+            'method' => $request?->getMethod(),
+        ]);
+    }
+
+    /**
+     * Deneme hakkı biten kuyruk işi.
+     *
+     * Rota yerine işin sınıfı gönderilir: panelde hangi işin düştüğü "Yol"
+     * sütununda görünür. 4xx eleme uygulanmaz — işte ModelNotFound gibi bir
+     * hata çağıranın değil, işin kendi arızasıdır.
+     *
+     * Sınıf adı maskelenmez: kişisel veri değil, ama 24+ karakterlik adlar
+     * (`SendMonthlyInvoiceReminderEmails`) jeton sanılıp `[jeton]` oluyor,
+     * farklı işler panelde tek satırda birleşiyordu.
+     *
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function recordJobFailed(string $job, Throwable $e): array
+    {
+        return $this->recordThrowable('job_failed', $e, mb_substr($job, 0, 300));
+    }
+
+    /**
+     * Başarısız zamanlanmış görev. Laravel sıfır olmayan çıkışı da istisnaya
+     * çeviriyor, yani istisna her zaman var.
+     *
+     * Görev adı `'/usr/bin/php8.3' 'artisan' rapor:gonder` biçiminde gelir;
+     * PHP yolu atılır — sunucudan sunucuya değişip aynı görevi iki satıra
+     * bölmesin. Görev adı maskelenir: argümanlar parola, jeton taşıyabilir.
+     *
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function recordScheduledTaskFailed(string $task, Throwable $e): array
+    {
+        $name = trim(self::stripPhpBinary($task));
+
+        return $this->recordThrowable(
+            'command_failed',
+            $e,
+            Scrubber::text($name, 300) ?? 'zamanlanmis-gorev',
+            // Laravel'in mesajı komutu PHP yoluyla taşıyor:
+            // `Scheduled command ['/usr/bin/php8.3' 'artisan' x] failed ...`.
+            // Yol mesajda kalırsa parmak izi yine sunucuya göre bölünür.
+            self::stripPhpBinary(...),
+        );
+    }
+
+    /** `'/usr/bin/php8.3' 'artisan' x` → `artisan x`. */
+    private static function stripPhpBinary(string $value): string
+    {
+        return (string) (preg_replace("/(?:'[^']*'|\"[^\"]*\")\s+(?:'artisan'|\"artisan\")/", 'artisan', $value) ?? $value);
+    }
+
+    /**
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    private function recordThrowable(string $kind, Throwable $e, string $route, ?\Closure $message = null): array
+    {
+        if ($this->ignored($e)) {
+            return ['sent' => false, 'error' => 'yok-sayildi'];
+        }
+
+        if ($this->alreadyReported($e)) {
+            return ['sent' => false, 'error' => 'zaten-raporlandi'];
+        }
+
+        // Senkron kuyrukta iş HTTP isteği içinde düşer; istek de işaretlensin.
+        $this->currentRequest()?->attributes->set(self::REPORTED_ATTRIBUTE, true);
+
+        return $this->send([
+            'kind' => $kind,
+            'msg' => Scrubber::message(
+                $message ? $message($e->getMessage()) : $e->getMessage(),
+                $this->containsSql($e),
+            ),
+            'exception_class' => $e::class,
+            'stack' => Scrubber::stack($e->getTraceAsString()),
+            'file' => Scrubber::path($e->getFile()),
+            'line' => $e->getLine(),
+            'route' => $route,
         ]);
     }
 
@@ -101,6 +253,34 @@ class Recorder
      * gönderilmiştir; burada harcanan süre kimseyi bekletmez.
      */
     public function recordRequest(Request $request, Response $response): void
+    {
+        $this->terminating = true;
+
+        try {
+            $this->flushPending();
+            $this->measureRequest($request, $response);
+        } finally {
+            // Octane'da sonraki istek temiz başlasın.
+            $this->reset();
+            $this->terminating = false;
+        }
+    }
+
+    /** Bekleyen olayları gönderir. Hiçbir koşulda fırlatmaz. */
+    public function flushPending(): void
+    {
+        while ($this->pending !== []) {
+            $payload = array_shift($this->pending);
+
+            try {
+                $this->client->send($payload);
+            } catch (Throwable) {
+                // Sessiz; sıradaki olay yine denenir.
+            }
+        }
+    }
+
+    private function measureRequest(Request $request, Response $response): void
     {
         if ($this->startedAt === null) {
             return;
@@ -111,6 +291,11 @@ class Recorder
         $slow = $durationMs >= $this->config['slow_request_ms'];
 
         if (! $slow && $status < 500) {
+            return;
+        }
+
+        // Hata stack'iyle raporlandı; "HTTP 500" aynı arızanın tekrarı olur.
+        if ($status >= 500 && $request->attributes->get(self::REPORTED_ATTRIBUTE)) {
             return;
         }
 
@@ -170,6 +355,10 @@ class Recorder
      */
     public function recordFatal(array $error): array
     {
+        // Süreç ölüyor: bekleyenler ve bu olay hemen gider, terminate gelmeyecek.
+        $this->terminating = true;
+        $this->flushPending();
+
         return $this->send([
             'kind' => 'fatal',
             /*
@@ -231,6 +420,20 @@ class Recorder
      */
     public function heartbeatIfDue(): void
     {
+        /*
+        | Kuyruk döngüsü (Looping) boştayken saniyeler içinde tekrar
+        | tetikleniyor. Önbelleğe dakikada en fazla bir kez bakılır; aradaki
+        | çağrılar bellek içinde döner.
+        */
+        // now(): testte zaman ileri alınabilsin.
+        $now = (float) now()->getTimestamp();
+
+        if ($this->heartbeatCheckedAt !== null && $now - $this->heartbeatCheckedAt < 60) {
+            return;
+        }
+
+        $this->heartbeatCheckedAt = $now;
+
         $key = 'nabiz:heartbeat:'.($this->config['key'] ?? 'bilinmeyen');
 
         // add(): yalnızca anahtar yoksa yazar ve true döner — yarış koşulunda
@@ -251,7 +454,7 @@ class Recorder
     private function send(array $event): array
     {
         try {
-            return $this->client->send(array_filter([
+            $payload = array_filter([
                 ...$event,
                 'env' => $this->config['env'],
                 'release' => $this->config['release'],
@@ -269,12 +472,45 @@ class Recorder
                 'sdk_version' => self::version(),
                 'framework_version' => app()->version(),
                 'user_id' => $this->userId(),
-            ], fn ($v) => $v !== null));
+            ], fn ($v) => $v !== null);
+
+            if ($this->shouldDefer($payload)) {
+                $this->pending[] = $payload;
+
+                return ['sent' => false, 'error' => 'ertelendi'];
+            }
+
+            return $this->client->send($payload);
         } catch (Throwable $e) {
             // Kendi hatasını raporlamaz — sonsuz döngü riski. Sonuç yalnızca
             // teşhis komutu için üretiliyor.
             return ['sent' => false, 'error' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Ölçülen bir HTTP isteğinin içindeysek olay terminate'e bekletilir.
+     *
+     * `startedAt` yalnızca ölçüm ara katmanı isteği başlattığında dolu;
+     * terminate onu mutlaka boşaltıyor. Konsol, kuyruk ve teşhis komutu
+     * bu koşulu hiç sağlamaz — oradaki davranış değişmez. Canlılık isteği
+     * (`events`) ertelenmez: terminate'ten sonra zaten çağrılıyor.
+     *
+     * Süreç terminate'e ulaşmadan biterse (exit, ölümcül hata) bekleyenler
+     * kapanışta gönderilir.
+     */
+    private function shouldDefer(array $payload): bool
+    {
+        if ($this->terminating || $this->startedAt === null || isset($payload['events'])) {
+            return false;
+        }
+
+        if (! $this->shutdownRegistered) {
+            $this->shutdownRegistered = true;
+            register_shutdown_function(fn () => $this->flushPending());
+        }
+
+        return true;
     }
 
     /**
@@ -284,9 +520,64 @@ class Recorder
      */
     private function routePattern(Request $request): string
     {
+        return $request->getMethod().' '.$this->routePath($request);
+    }
+
+    /** Yöntemsiz desen: `/api/products/{id}`. */
+    private function routePath(Request $request): string
+    {
         $uri = $request->route()?->uri();
 
-        return $request->getMethod().' /'.ltrim($uri ?? Scrubber::path($request->getPathInfo()) ?? '', '/');
+        return '/'.ltrim($uri ?? Scrubber::path($request->getPathInfo()) ?? '', '/');
+    }
+
+    /**
+     * Hata anındaki HTTP isteği; konsolda ya da istek dışında null.
+     *
+     * `runningInConsole()` tek başına yetmiyor: testlerde ve Octane'da CLI
+     * altında gerçek istekler işleniyor. Eşleşmiş rota, web SAPI'si ya da
+     * Octane işçisi gerçek bir istek demek; konsolun varsayılan boş isteği
+     * bunların hiçbirini taşımaz. Octane'da rotadan önce (global
+     * middleware'de) düşen hata da böylece isteği işaretler.
+     */
+    private function currentRequest(): ?Request
+    {
+        try {
+            if (! app()->bound('request')) {
+                return null;
+            }
+
+            $request = app('request');
+
+            if (! $request instanceof Request) {
+                return null;
+            }
+
+            return $request->route() !== null || ! app()->runningInConsole() || self::octane()
+                ? $request
+                : null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * 4xx taşıyan hata raporlanmaz: çağıranın hatası, arıza değil.
+     *
+     * Laravel bunları kendi dontReport listesiyle zaten eliyor, ama paket
+     * log olayını da dinliyor (MessageLogged). Uygulama yakaladığı bir
+     * 404'ü `Log::warning('...', ['exception' => $e])` ile yazınca
+     * dontReport'u atlayıp hub'a gidiyordu. `instanceof` sınıfı otomatik
+     * yüklemez; illuminate/database kurulu olmasa da güvenle çalışır.
+     */
+    private function clientError(Throwable $e): bool
+    {
+        if ($e instanceof HttpExceptionInterface) {
+            return $e->getStatusCode() < 500;
+        }
+
+        // ModelNotFoundException bunun alt sınıfı.
+        return $e instanceof RecordsNotFoundException;
     }
 
     private function controller(Request $request): ?string
@@ -336,13 +627,11 @@ class Recorder
 
     private function alreadyReported(Throwable $e): bool
     {
-        $id = spl_object_id($e);
-
-        if (isset($this->reported[$id])) {
+        if (isset($this->reported[$e])) {
             return true;
         }
 
-        $this->reported[$id] = true;
+        $this->reported[$e] = true;
 
         return false;
     }

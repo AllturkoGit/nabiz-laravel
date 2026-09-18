@@ -10,6 +10,129 @@ composer require allturko/nabiz
 
 ---
 
+## 0.2.3
+
+### Eklendi
+
+- **Sürüm etiketi otomatik.** `NABIZ_RELEASE` boşsa sırayla CI/PaaS
+  değişkenleri (`GIT_COMMIT`, `GIT_SHA`, `COMMIT_SHA`, `SOURCE_VERSION`,
+  `VERCEL_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`, `HEROKU_SLUG_COMMIT`,
+  `CI_COMMIT_SHA`), sonra proje kökündeki `.git` okunuyor (dal, packed-refs,
+  ayrık HEAD, `gitdir:` dosyası). Commit ilk 12 haneye kısaltılıyor. Kabuk
+  komutu yok, önbellek yok (FPM işçisi deploy'dan sağ çıkıyor). Hub artık
+  hatanın hangi deploy'la başladığını gösterebiliyor. Kural üç pakette aynı.
+- **`nabiz:durum` sürüm etiketini ve kaynağını gösteriyor**
+  (`kaynak: NABIZ_RELEASE | <DEĞİŞKEN> | .git | yok`).
+- **`nabiz:durum` güncelleme denetimi.** Packagist'teki en yeni kararlı
+  sürüm yazılıyor; kurulu olan eskiyse `composer require
+  allturko/nabiz:^X.Y` önerisi çıkıyor (uyarı, çıkış kodu değişmez).
+  Ağ yoksa `denetlenemedi`; `NABIZ_DURUM_CEVRIMDISI=1` atlar.
+- **Ortam adı normalleştiriliyor.** Hub yalnızca production/staging/local
+  kabul ediyor ve küme dışını — canlılık dahil — 204 dönüp atıyor.
+  `APP_ENV=development` ya da `prod` ile kurulan proje hiçbir şey
+  göndermiyormuş gibi görünüyordu. Takma adlar çevriliyor (`prod`/`live`,
+  `stage`/`stg`/`preprod`/`uat`, `dev`/`development`/`test`/`testing`);
+  tanınmayan değer olduğu gibi gidiyor ve teşhis komutu hata veriyor.
+  Tablo üç pakette aynı.
+- **Hata gönderimi yanıtı bekletmiyor.** Ölçülen HTTP isteğinde hata ve
+  yavaş sorgu olayı terminate'e bekletiliyor; eskiden `report()` yanıttan
+  önce hub'ı zaman aşımı kadar bekleyebiliyordu. terminate'e ulaşmayan
+  süreçte kapanışta gönderiliyor.
+- **`job_failed`.** README yıllardır yazıyordu ama hiç gönderilmiyordu.
+  Deneme hakkı biten iş `JobFailed` olayıyla kaydediliyor; Laravel'in
+  ardından handler'a verdiği aynı hata elenir.
+- **`command_failed`.** Başarısız zamanlanmış görev (sıfır olmayan çıkış
+  dahil). Cron'daki sessiz başarısızlık görünür oldu. PHP yolu görev
+  adından ve mesajdan atılıyor (`artisan rapor:gonder`); yol sunucudan
+  sunucuya değişip aynı görevi iki satıra bölmesin. `runInBackground()`
+  görevlerinde Laravel başarısızlık olayı üretmiyor — bkz. README.
+- **Kuyruk ve zamanlayıcıda canlılık.** Yalnızca kuyruk ya da zamanlayıcı
+  çalıştıran uygulama HTTP isteği görmediği için nabız hiç atmıyor, kurulum
+  "sessiz" görünüyordu.
+- **Octane.** İşçiler CLI altında çalıştığı için istek ölçümü hiç
+  kurulmuyordu. Kuruluyor; `LARAVEL_START` yerine istek anı kullanılıyor
+  (yoksa her istek işçinin ömrü kadar "yavaş" görünürdü). Sayaçlar istek
+  sonunda ve kuyruk işi başlarken sıfırlanıyor. Recorder açılışta
+  çözülüyor: Octane'ın istek başına açtığı uygulama kopyaları tek örneği
+  paylaşıyor (yoksa kancalar ile ölçüm ayrı örneklere yazıyor, istek
+  kayıtlarında sorgu sayısı hep 0 görünürdü).
+
+### Düzeltildi
+
+- **`nabiz:durum` hizası.** Etiketler bayta göre dolduruluyordu; Türkçe
+  harfli satırlar (`Paket sürümü`, `Proje anahtarı`) kayıyordu.
+- **Tek arıza iki kayıt oluyordu.** Hata veren istek stack'li `exception`'ın
+  yanında ölçüm middleware'inden stack'siz bir `http_5xx` daha açıyordu.
+  İstek işaretleniyor; işaretli istekte `http_5xx` açılmıyor.
+- **Hata kayıtlarında rota ve yöntem yoktu.** Panelde hatanın hangi uçta
+  patladığı görünmüyor, "Yol" `/` kalıyordu. Artık desen gönderiliyor
+  (`/api/urunler/{id}`).
+- **Uzun ömürlü süreçte yeni hatalar yutulabiliyordu.** Tekrar eleme
+  `spl_object_id` dizisiydi; kimlik çöp toplanınca yeniden kullanılıyor,
+  dizi hiç temizlenmiyordu. Kuyruk işçisinde aynı kimliği alan yeni hata
+  "zaten raporlandı" sayılıyordu. `WeakMap`'e geçildi.
+- **Günlüğe yazılan 4xx hub'a gidiyordu.** Paket log olayını da dinliyor;
+  uygulama yakaladığı bir 404'ü `Log::warning(..., ['exception' => $e])` ile
+  yazınca Laravel'in dontReport listesi atlanıyordu. 400–499 taşıyan
+  `HttpException` ve `ModelNotFoundException` artık raporlanmıyor.
+- **`NABIZ_TIMEOUT` birimi.** `(int)` okunuyordu: `0.5` sıfıra — curl'de
+  sınırsız beklemeye — dönüyordu. Node paketi aynı adla milisaniye
+  beklediği için `2000` yazılınca PHP süreci 2000 saniye bekleyebilirdi.
+  Artık saniye, 100 ve üstü milisaniye; geçersiz, sıfır, negatif ya da
+  sonsuz değer 2 sn; sonuç 0,1–10 sn aralığına kırpılıyor (kural bütün
+  SDK'larda aynı). `_MS` curl seçenekleri ve `CURLOPT_NOSIGNAL`
+  kullanılıyor.
+- **8 KB sınırı.** Hub büyük gövdeyi okumadan atıp yine 204 dönüyor. Alanlar
+  karakterle kesildiği için 3–4 baytlık karakter taşıyan stack sınırı
+  aşabiliyordu. Önce stack, sonra mesaj, sonra en yavaş sorgu atılıyor.
+  Geçersiz UTF-8 artık gövdeyi düşürmüyor (`JSON_INVALID_UTF8_SUBSTITUTE`).
+- **Geçersiz UTF-8 taşıyan metinde e-posta maskelenmiyordu.** E-posta deseni
+  `/u` bayraklı; bozuk baytta desen sessizce atlanıyor, adres olduğu gibi
+  gidiyordu (ör. latin1 veritabanı hatası). Metin önce `mb_scrub` ile
+  onarılıyor.
+- **Senkron kuyruk isteğin ölçümünü siliyordu.** `sync`/`deferred`
+  bağlantısındaki iş isteğin içinde çalışıyor; iş başlarken yapılan
+  sıfırlama isteğin başlangıç zamanını silip `slow_request` ve `http_5xx`'i
+  kaybettiriyordu, canlılık da yanıttan önce ağ isteği atabiliyordu. Bu
+  işlerde sıfırlama ve canlılık atlanıyor; `job_failed` kaydı kalıyor.
+- **Uzun iş sınıfı adları `[jeton]` oluyordu.** `job_failed` rotasındaki
+  sınıf adı artık maskelenmiyor (kişisel veri değil); farklı işler panelde
+  tek satırda birleşiyordu. Zamanlanmış görev adı maskelenmeye devam ediyor.
+- **Octane'da rotadan önce düşen hata** isteği işaretlemiyordu; aynı arıza
+  ayrıca `http_5xx` açıyordu.
+- **Maskeleme okunur adları bozuyordu.** Yükleme dosya adları okunur kalıyor. `<ad>-<zaman damgası>-<rastgele>.jpeg`
+  biçimindeki adlar panelde `/uploads/discount/[jeton][kart]-752066249.jpeg`
+  diye çıkıyordu: zaman damgası kart, uzun ad jeton sanılıyordu.
+
+  - **Kart:** yalnızca 2–9 ile başlayan ve Luhn'dan geçen dizi maskelenir.
+    Kart ağlarının hiçbiri 0/1 ile başlamıyor, milisaniye damgası 1 ile
+    başlıyor. Bilinen taviz: Luhn'u tutmayan (yanlış yazılmış) kart
+    numarası ve 1 ile başlayan UATP kartları artık maskelenmiyor.
+  - **Jeton:** 16+ karakterlik bölünmemiş parça taşıyan ya da harf içeren hex
+    dizi (UUID, hash) maskelenir. Tireyle birleşmiş kısa parçalar okunur addır.
+    Bilinen taviz: tire/alt çizgiyle kısa parçalara bölünmüş rastgele
+    anahtarlar (ör. base64url jetonların bir kısmı) kaçabilir. İki taviz
+    de dosya adlarının okunur kalması için bilerek kabul edildi.
+  - **Telefon:** önünde rakam varsa eşleşmez. Son on hanesi 5 ile başlayan
+    zaman damgası `179[telefon]` oluyordu.
+
+  Kurallar hub, `t.js`, Node, Laravel ve Python'da birebir aynı; 28 ortak
+  vektörle karşılaştırıldı.
+
+---
+
+## 0.2.2
+
+### Eklendi
+
+- **`nabiz:durum --nabiz`.** Yalnızca canlılık isteği gönderir, panele hata
+  düşürmez. Onlarca kurulumu gezen güncelleme döngüsü için: `--test` orada
+  panele onlarca sahte hata bırakıyordu.
+
+`v0.2.1` etiketi `v0.2.0` ile aynı commit'i gösteriyor; ayrı bir sürüm değil.
+
+---
+
 ## 0.2.0
 
 **Hub gereksinimi — bu sürümde önemli.** Ölümcül hatalar `fatal` türüyle

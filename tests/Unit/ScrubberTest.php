@@ -83,3 +83,45 @@ test('SQL literal değerleri mesajda da normalize edilir', function () {
 
     expect($sonuc)->not->toContain('a@b.com');
 });
+
+/*
+| Yükleme dosya adları okunur kalmalı: zaman damgası kart, uzun ad jeton
+| sanılıyordu (`/uploads/discount/[jeton][kart]-752066249.jpeg`).
+| Beklenenler hub Scrubber'ıyla ortak vektörlerden.
+*/
+test('yükleme dosya adı okunur kalır', function (string $yol) {
+    expect(Scrubber::path($yol))->toBe($yol);
+})->with([
+    ['/uploads/discount/kampanya-gorseli-yaz-indirimi-1726571234567-752066249.jpeg'],
+    ['/uploads/sliders/slider-slider-1726571234567-249230604-1726571239999-875783343.png'],
+    ['/uploads/products/urun-1795123456789-123456789.png'],
+]);
+
+test('kart yalnızca gerçek kart numarasıysa maskelenir', function (string $girdi, string $beklenen) {
+    expect(Scrubber::text($girdi, 500))->toBe($beklenen);
+})->with([
+    ['kart 4111111111111111 red', 'kart [kart] red'],
+    ['378282246310005 red', '[kart] red'],
+    ['saat 1726571234567 geçti', 'saat 1726571234567 geçti'],
+    ['no 4111111111111112', 'no 4111111111111112'],
+    // Luhn'u tutan damga: yalnızca ilk hane kuralı ayırıyor.
+    ['saat 1726571234573 geçti', 'saat 1726571234573 geçti'],
+]);
+
+// Sol sınır eklenince + olmadan 90 ön eki sızıyordu (önceden `9[telefon]`).
+test('90 ön ekli telefon maskelenir', function (string $girdi) {
+    expect(Scrubber::text($girdi, 500))->toBe('tel [telefon]');
+})->with([['tel 905321234567'], ['tel 90 532 123 45 67']]);
+
+test('rastgele diziler yeni kuralla da maskelenir', function (string $girdi) {
+    expect(Scrubber::text($girdi, 500))->toBe('x [jeton] y');
+})->with([
+    ['x 3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b y'],
+    ['x ghp_16C7e42F292c6912E7710c838347Ae178B4a y'],
+    ['x a1b2c3d4-e5f6a7b8-c9d0e1f2-a3b4c5d6 y'],
+]);
+
+// Eposta deseni `/u` bayraklı; geçersiz baytta desen sessizce atlanıyordu.
+test('geçersiz UTF-8 taşıyan metinde eposta yine maskelenir', function () {
+    expect(Scrubber::message("SQLSTATE: ahmet@ornek.com \xff", true))->toBe('SQLSTATE: [eposta] ?');
+});

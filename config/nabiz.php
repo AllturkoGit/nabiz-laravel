@@ -38,7 +38,8 @@ return [
     // Boş bırakılırsa uygulamanın kendi ortamı kullanılır.
     'env' => env('NABIZ_ENV'),
 
-    // Deploy etiketi: hatanın hangi sürümle geldiğini bulmak için.
+    // Deploy etiketi: hatanın hangi sürümle geldiğini bulmak için. Boşsa
+    // CI değişkeninden ya da `.git`'ten çalışma anında bulunur (bkz. Release).
     'release' => env('NABIZ_RELEASE'),
 
     /*
@@ -97,6 +98,14 @@ return [
     |
     */
 
-    'timeout' => (int) env('NABIZ_TIMEOUT', 2),
+    /*
+    | Saniye. 100 ve üstü milisaniye sayılır (bkz. HubClient::timeoutSeconds):
+    | Node paketi milisaniye bekliyor ve aynı adla `NABIZ_TIMEOUT=2000`
+    | yazılınca PHP süreci hub'ı 2000 saniye beklerdi. Eskiden `(int)` ile
+    | okunuyor, `0.5` sıfıra — sınırsız beklemeye — dönüyordu. Geçersiz,
+    | sıfır, negatif ya da sonsuz değer 2 sn olur; sonuç 0,1–10 sn
+    | aralığına kırpılır.
+    */
+    'timeout' => env('NABIZ_TIMEOUT', 2),
 
 ];

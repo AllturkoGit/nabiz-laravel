@@ -69,9 +69,26 @@ test('pencere dolunca yeniden gönderilir', function () {
 
     $recorder->heartbeatIfDue();
     Cache::flush();
+    $this->travel(2)->minutes();
     $recorder->heartbeatIfDue();
 
     expect($gonderilenler)->toHaveCount(2);
+});
+
+/*
+| Kuyruk döngüsü boştayken saniyeler içinde tekrar tetikleniyor. Önbellek
+| boşalmış olsa bile dakika dolmadan tekrar bakılmaz.
+*/
+test('bir dakika içinde önbelleğe tekrar bakılmaz', function () {
+    $gonderilenler = [];
+    $recorder = nabizKaydedici($gonderilenler);
+
+    $recorder->heartbeatIfDue();
+    Cache::flush();
+    $this->travel(30)->seconds();
+    $recorder->heartbeatIfDue();
+
+    expect($gonderilenler)->toHaveCount(1);
 });
 
 /**

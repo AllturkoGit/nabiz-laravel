@@ -46,11 +46,23 @@ kopyalanmışsa hiçbir şey patlamaz, hiçbir log düşmez — hub geçersiz im
 döner. Kurulum aylarca çalışmıyor olabilir ve bu sessizlik "sorun yok" sanılır.
 
 Komut yerelde yanlış olan ne varsa gösterir: eksik değişken, hatalı secret uzunluğu,
-şifresiz hub adresi.
+şifresiz hub adresi. Ayrıca (0.2.3+):
+
+- **Sürüm etiketi** ve nereden bulunduğu: `Sürüm etiketi: 3f2a1b4c5d6e (kaynak: .git)`.
+  Kaynak `NABIZ_RELEASE`, ortam değişkeninin adı (`GIT_COMMIT` …), `.git` ya da `yok`.
+- **Güncel sürüm** — Packagist'teki en yeni kararlı sürüm. Kurulu olan eskiyse
+  `Güncelleme var: composer require allturko/nabiz:^X.Y` uyarısı çıkar; bu bir hata
+  sayılmaz, çıkış kodu değişmez. Packagist'e ulaşılamazsa `denetlenemedi` yazar. Ağı
+  olmayan sunucuda ya da CI'da `NABIZ_DURUM_CEVRIMDISI=1` denetimi atlar. Bu istek
+  yalnızca komutta atılır; uygulama çalışırken paket dışarıya başka istek atmaz.
 
 ```bash
-php artisan nabiz:durum --test   # hub'a bir sınama olayı gönderir
+php artisan nabiz:durum --test    # hub'a bir sınama olayı gönderir — panelde hata olarak görünür
+php artisan nabiz:durum --nabiz   # yalnızca canlılık isteği — panele hata düşürmez
 ```
+
+`--test` tek bir kurulumu doğrularken doğru seçim. Onlarca kurulumu gezen bir güncelleme
+döngüsünde `--nabiz` kullanılır: `--test` orada panele onlarca sahte hata bırakır.
 
 Verinin gerçekten ulaştığı yalnızca **hub panelinden** doğrulanır: proje satırındaki
 bağlantı durumu `Bağlı` görünmelidir. Komut bunu kendi başına söyleyemez, çünkü hub
@@ -62,14 +74,40 @@ geçerli ile geçersiz imzayı dışarıya aynı yanıtla karşılar.
 
 | Alan | Örnek |
 |---|---|
-| `kind` | `exception` · **`fatal`** · `http_5xx` · `slow_request` · `slow_query` · `job_failed` |
+| `kind` | `exception` · **`fatal`** · `http_5xx` · `slow_request` · `slow_query` · `job_failed` · `command_failed` |
 | `msg`, `exception_class`, `stack`, `file`, `line` | Hata bilgisi (maskelemeden geçer) |
-| `route` | `GET /api/products/{id}` — **desen, gerçek id değil** |
+| `route` | **Desen, gerçek id değil.** İstek kayıtlarında (`slow_request`, `http_5xx`) yöntemle birlikte: `GET /api/products/{id}`. Hata kayıtlarında (`exception`, 0.2.3+) yalnızca yol — `/api/products/{id}` — ve yöntem ayrı `method` alanında. `job_failed`'da işin sınıfı, `command_failed`'da görev adı |
 | `controller`, `method`, `status` | `ProductController@show`, `GET`, `500` |
 | `duration_ms`, `memory_mb` | Performans |
 | `query_count` | SQL sorgu sayısı — N+1 tespiti |
 | `slowest_query_sql` | **Normalize:** `select * from users where email = ?` |
 | `release`, `php_version`, `framework_version` | Ortam |
+
+### Kuyruk, zamanlayıcı ve Octane (0.2.3+)
+
+| Durum | Ne gelir |
+|---|---|
+| Deneme hakkı biten kuyruk işi | `job_failed` — "Yol" sütununda işin sınıfı. Laravel aynı hatayı ardından handler'a da veriyor; tek kayıt kalır |
+| Ara denemede düşen iş | `exception` (her deneme) |
+| Başarısız zamanlanmış görev | `command_failed` — "Yol": `artisan rapor:gonder`. Sıfır olmayan çıkış kodu dahil. PHP yolu addan ve mesajdan atılır |
+| Yalnızca kuyruk/zamanlayıcı çalıştıran uygulama | Canlılık nabzı iş bitiminde, kuyruk döngüsünde ve görev bitiminde de atılır; önbelleğe dakikada en fazla bir kez bakılır |
+| Senkron kuyruk (`sync`, `deferred`) | İş isteğin içinde çalışır; isteğin ölçümü bozulmaz. Başarısız iş yine `job_failed` açar ve isteği işaretler |
+| Octane | İstek ölçümü kurulur (`LARAVEL_OCTANE` ortam değişkeninden tanınır — `octane:start` bunu koyar; sunucuyu kendi başına başlatan kurulumlarda elle tanımlanmalı). Başlangıç zamanı istek anından alınır; sayaçlar istek sonunda ve kuyruk işi başlarken sıfırlanır |
+
+**Bilinen sınırlar:**
+
+- **`runInBackground()` görevleri** başarısız olduğunda Laravel `ScheduledTaskFailed`
+  olayını üretmiyor; bu görevler için `command_failed` gelmez. Görev bir artisan
+  komutuysa komutun kendi fırlattığı istisna yine `exception` olarak gelir.
+- **Artisan görevi iki kayıt açabilir.** `Schedule::command()` komutu ayrı bir süreçte
+  çalıştırır. Komut istisna fırlatırsa o süreç hatayı kendisi `exception` olarak
+  raporlar (stack'li), zamanlayıcı da sıfır olmayan çıkışı `command_failed` olarak
+  bildirir. İkisi farklı süreçlerde olduğu için elenemez; bilerek kabul edildi.
+- **`job_failed` ve `command_failed` Laravel'in rapor ayarlarından geçmez.** Bu
+  kayıtlar kuyruk/zamanlayıcı olayından açılır; handler'daki `dontReport`, `throttle`
+  ve istisna eşleme (`$exceptions->map()`) bunlara uygulanmaz — yalnızca
+  `nabiz.ignore` uygulanır. Eşleme kullanılıyorsa aynı arıza bir `job_failed`
+  (özgün istisna) ve bir `exception` (eşlenmiş istisna) açabilir.
 
 ### Ölümcül hatalar ayrı bir tür
 
@@ -174,8 +212,58 @@ Paket, kurulduğu uygulamanın davranışını **değiştirmez**:
 | `slow_request_ms` | 1000 | Bu süreyi aşan istekler `slow_request` olarak raporlanır |
 | `slow_query_ms` | 500 | Bu süreyi aşan sorgular `slow_query` olarak raporlanır |
 | `capture_user_id` | `false` | Açılırsa kimliği belirli kişiye bağlı veri toplanır |
-| `ignore` | `[]` | Raporlanmayacak exception sınıfları |
-| `timeout` | 2 | Hub'a bağlanma zaman aşımı (sn) |
+| `ignore` | 6 sınıf¹ | Raporlanmayacak exception sınıfları (alt sınıflar da eşleşir) |
+| `timeout` | 2 | Hub zaman aşımı, **saniye**. 100 ve üstü milisaniye sayılır; 0,1–10 sn aralığına kırpılır² |
+| `release` | `NABIZ_RELEASE`, yoksa otomatik³ | Hatanın hangi deploy'la başladığını gösteren sürüm etiketi |
+| `env` | `NABIZ_ENV`, yoksa `APP_ENV` | `production` · `staging` · `local`. Takma adlar çevrilir: `prod`/`live` → production, `stage`/`stg`/`preprod`/`uat` → staging, `dev`/`development`/`test`/`testing` → local. Tanınmayan değeri hub reddeder; teşhis komutu hata verir |
+
+¹ `AuthenticationException`, `AuthorizationException`, `ValidationException`,
+`TokenMismatchException`, `NotFoundHttpException`, `MethodNotAllowedHttpException`.
+Ayrıca listeden bağımsız olarak **4xx taşıyan her hata** (`HttpException` 400–499,
+`ModelNotFoundException`) raporlanmaz — uygulama onu kendisi günlüğe yazsa bile.
+Tek istisna `job_failed`: kuyruk işinde `ModelNotFoundException` çağıranın değil işin
+kendi arızasıdır ve bilerek raporlanır.
+
+² Node paketi aynı adla milisaniye bekliyor; `NABIZ_TIMEOUT=2000` burada 2 saniye olur,
+2000 saniye değil. Kesirli değer (`0.5`) desteklenir. Geçersiz, sıfır, negatif ya da
+sonsuz değer varsayılana (2 sn) döner; sonuç 0,1–10 sn aralığına kırpılır (`50` → 10 sn,
+`0.0001` → 0,1 sn). Kural bütün SDK'larda aynı.
+
+³ **Sürüm etiketi otomatik bulunur (0.2.3+).** `NABIZ_RELEASE` neredeyse hiçbir kurulumda
+doldurulmuyordu; hub bir hatanın hangi deploy'la başladığını söyleyemiyordu. Deploy'larımız
+`git pull` olduğu için `.git` sunucuda duruyor ve etiket oradan okunabiliyor. Sıra (Node ve
+Python paketleriyle aynı):
+
+1. `NABIZ_RELEASE` — boşluk kırpılır, en fazla 64 karakter, olduğu gibi.
+2. İlk dolu ortam değişkeni: `GIT_COMMIT`, `GIT_SHA`, `COMMIT_SHA`, `SOURCE_VERSION`,
+   `VERCEL_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`, `HEROKU_SLUG_COMMIT`, `CI_COMMIT_SHA`.
+   Commit gibi görünüyorsa (7–40 onaltılık hane) küçük harfle ilk 12 hane, değilse en
+   fazla 64 karakter. Çalışma anında okunur; `config:cache` etkilemez.
+3. Proje kökündeki `.git`: `HEAD` → dal referansı ya da `packed-refs`; ayrık HEAD
+   doğrudan commit. `.git` bir dosyaysa (`gitdir: …`, alt modül) gösterdiği dizin
+   okunur. Geçerli 40 haneli commit'in ilk 12 hanesi.
+4. Hiçbiri yoksa gönderilmez.
+
+Kabuk komutu (`git`) çalıştırılmaz, yalnızca iki küçük dosya okunur. Sonuç süreçler arası
+önbelleklenmez: FPM işçisi deploy'dan sağ çıkar ve önbellek eski commit'i raporlamaya devam
+ederdi. Git worktree (`commondir`) desteklenmez — o durumda `NABIZ_RELEASE` kullanın.
+
+### Hata gönderimi yanıtı bekletmez (0.2.3+)
+
+HTTP isteği içinde oluşan hata ve yavaş sorgu olayı hemen gönderilmez; istek
+bitiminde (terminate), yanıt kullanıcıya gittikten sonra gönderilir. Eskiden
+`report()` yanıttan önce çalışıyor, hub yavaşsa kullanıcı zaman aşımı kadar
+bekliyordu. Süreç terminate'e ulaşmadan biterse (exit, ölümcül hata) bekleyen
+olaylar kapanışta gider. Konsol ve kuyrukta davranış değişmedi.
+
+### Tek arıza, tek kayıt
+
+Hata veren istek yalnızca **stack'li `exception`** kaydı açar; ölçüm aynı istek için
+ayrıca `http_5xx` göndermez (0.2.3+). Hatasız dönen 5xx (`response('...', 503)`) yine
+`http_5xx` olarak gelir.
+
+Gövde hub'ın 8 KB sınırını aşarsa önce stack, sonra mesajın 200 karakter sonrası,
+sonra en yavaş sorgu atılır — olay stack'siz de olsa ulaşır.
 
 ---
 
@@ -183,7 +271,8 @@ Paket, kurulduğu uygulamanın davranışını **değiştirmez**:
 
 Sunucudan sunucuya gönderim HMAC ile imzalanır:
 
-- `X-Nabiz-Signature: sha256=<hmac_sha256(gövde, NABIZ_SECRET)>`
+- `X-Nabiz-Signature: sha256=<hmac_sha256(zaman_damgası + "." + gövde, NABIZ_SECRET)>`
+  — damga imzaya dahil; olmasaydı eski bir gövde damgası değiştirilip yeniden oynatılabilirdi
 - `X-Nabiz-Timestamp` — 5 dakikadan eski istekler hub tarafından reddedilir (replay koruması)
 - İmza karşılaştırması `hash_equals()` ile yapılır
 

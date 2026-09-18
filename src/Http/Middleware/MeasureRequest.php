@@ -26,8 +26,11 @@ class MeasureRequest
         //
         // LARAVEL_START uygulamanın gerçek başlangıcıdır; framework'ün
         // önyükleme süresi de ölçüme dahil olsun.
+        //
+        // Octane'da LARAVEL_START işçinin açıldığı an: her istek saatlerce
+        // sürmüş, yani "yavaş" görünürdü. Orada istek anı kullanılıyor.
         $this->recorder->startRequest(
-            defined('LARAVEL_START') ? LARAVEL_START : microtime(true),
+            defined('LARAVEL_START') && ! Recorder::octane() ? LARAVEL_START : microtime(true),
         );
 
         return $next($request);

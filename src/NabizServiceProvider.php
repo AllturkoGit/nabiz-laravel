@@ -4,11 +4,20 @@ namespace Allturko\Nabiz;
 
 use Allturko\Nabiz\Console\DurumCommand;
 use Allturko\Nabiz\Http\Middleware\MeasureRequest;
+use Allturko\Nabiz\Support\Environment;
+use Allturko\Nabiz\Support\Release;
 use Allturko\Nabiz\Transport\HubClient;
+use Illuminate\Console\Events\ScheduledTaskFailed;
+use Illuminate\Console\Events\ScheduledTaskFinished;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\Looping;
+use Illuminate\Queue\Jobs\SyncJob;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
@@ -33,8 +42,10 @@ class NabizServiceProvider extends ServiceProvider
                 // deposunu paylaşan iki uygulama birbirinin nabzını
                 // bastırmasın.
                 'key' => config('nabiz.key'),
-                'env' => config('nabiz.env') ?: $app->environment(),
-                'release' => config('nabiz.release'),
+                'env' => Environment::normalize(config('nabiz.env') ?: $app->environment()),
+                // NABIZ_RELEASE boşsa CI değişkeni ya da `.git`'ten okunur
+                // (bkz. Release). Her açılışta okunur, önbelleklenmez.
+                'release' => Release::detect($app->basePath(), config('nabiz.release'))['value'],
                 'slow_request_ms' => config('nabiz.slow_request_ms'),
                 'slow_query_ms' => config('nabiz.slow_query_ms'),
                 'capture_user_id' => config('nabiz.capture_user_id'),
@@ -64,10 +75,120 @@ class NabizServiceProvider extends ServiceProvider
             return;
         }
 
+        /*
+        | Recorder şimdi çözülür: Octane her isteği uygulamanın bir
+        | kopyasında (sandbox) işliyor. Tekil burada oluşmazsa her kopya
+        | kendi Recorder'ını açıyordu; kancalar ana uygulamadakine, ölçüm
+        | middleware'i kopyadakine yazıyor, istek kayıtlarında sorgu sayısı
+        | hep 0 görünüyordu.
+        */
+        $this->app->make(Recorder::class);
+
         $this->hookQueries();
         $this->hookExceptions();
         $this->hookRequests();
+        $this->hookQueue();
+        $this->hookSchedule();
         $this->hookFatals();
+    }
+
+    /**
+     * Kuyruk: başarısız iş, iş başına durum sıfırlama, canlılık.
+     *
+     * **job_failed** README'de yıllardır yazıyordu ama hiç gönderilmiyordu.
+     * Deneme hakkı biten iş `JobFailed` olayıyla gelir; Laravel aynı hatayı
+     * ardından handler'a da raporluyor (Worker::runJob) — önce burada
+     * kaydedildiği için Recorder ikincisini eler, panelde tek satır olur.
+     * Ara denemeler `exception` olarak gelmeye devam eder.
+     *
+     * **Canlılık:** yalnızca kuyruk ya da zamanlayıcı çalıştıran uygulamada
+     * hiç HTTP isteği olmuyor ve nabız hiç atmıyordu; kurulum "sessiz"
+     * görünüyordu. Looping boştayken de tetiklenir; Recorder önbelleğe
+     * dakikada en fazla bir kez bakar.
+     */
+    private function hookQueue(): void
+    {
+        try {
+            $events = $this->app['events'];
+
+            /*
+            | Senkron iş (sync, deferred) HTTP isteğinin İÇİNDE çalışır:
+            | sıfırlama isteğin başlangıç zamanını silip slow_request ve
+            | http_5xx'i kaybettiriyor, canlılık da yanıttan önce ağ
+            | isteği atıyordu. Bu işlerde ikisi de atlanır; başarısızlık
+            | kaydı kalır (isteği de işaretler).
+            */
+            $events->listen(JobProcessing::class, fn (JobProcessing $e) => $this->syncJob($e->job)
+                ? null
+                : $this->safely(fn (Recorder $r) => $r->reset()));
+
+            $events->listen(JobFailed::class, fn (JobFailed $e) => $this->safely(
+                fn (Recorder $r) => $r->recordJobFailed($this->jobName($e->job), $e->exception),
+            ));
+
+            $events->listen(JobProcessed::class, fn (JobProcessed $e) => $this->syncJob($e->job)
+                ? null
+                : $this->safely(fn (Recorder $r) => $r->heartbeatIfDue()));
+            $events->listen(Looping::class, fn () => $this->safely(fn (Recorder $r) => $r->heartbeatIfDue()));
+        } catch (Throwable) {
+            // Sessiz.
+        }
+    }
+
+    /**
+     * Zamanlanmış görevler: başarısızlık `command_failed`, her tur canlılık.
+     *
+     * Cron'la çalışan görev sessizce başarısız olabiliyor — kimse ekrana
+     * bakmıyor. Laravel sıfır olmayan çıkışı da istisnaya çeviriyor ve önce
+     * bu olayı, sonra handler'ı çağırıyor; kayıt burada `command_failed`
+     * türüyle açılır, handler'ınki elenir.
+     */
+    private function hookSchedule(): void
+    {
+        try {
+            $events = $this->app['events'];
+
+            $events->listen(ScheduledTaskFailed::class, fn (ScheduledTaskFailed $e) => $this->safely(
+                fn (Recorder $r) => $r->recordScheduledTaskFailed(
+                    $e->task->description ?: (string) $e->task->command,
+                    $e->exception,
+                ),
+            ));
+
+            $events->listen(ScheduledTaskFinished::class, fn () => $this->safely(fn (Recorder $r) => $r->heartbeatIfDue()));
+        } catch (Throwable) {
+            // Sessiz.
+        }
+    }
+
+    /** İstek sürecinde çalışan iş: sync ve deferred bağlantıları SyncJob üretir. */
+    private function syncJob(mixed $job): bool
+    {
+        try {
+            return $job instanceof SyncJob
+                || in_array($job->getConnectionName(), ['sync', 'deferred'], true);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function jobName(mixed $job): string
+    {
+        try {
+            return (string) $job->resolveName();
+        } catch (Throwable) {
+            return 'bilinmeyen-is';
+        }
+    }
+
+    /** Kanca gövdesi: Recorder'a ulaşır, hiçbir koşulda fırlatmaz. */
+    private function safely(callable $callback): void
+    {
+        try {
+            $callback($this->app->make(Recorder::class));
+        } catch (Throwable) {
+            // Kendi hatasını raporlamaz — sonsuz döngü riski.
+        }
     }
 
     /**
@@ -145,7 +266,7 @@ class NabizServiceProvider extends ServiceProvider
      * sarmalayıcısıyla değiştiriyor ve boot sırasında kaydedilen reportable
      * geri çağrısı başka bir örnekte kalabiliyor — gerçek bir kurulumda tam
      * olarak bu yaşandı, hiçbir istisna raporlanmadı. Çift kayıt sorun değil:
-     * Recorder aynı istisnayı iki kez göndermez (spl_object_id ile eler).
+     * Recorder aynı istisnayı iki kez göndermez (WeakMap ile eler).
      *
      * `reportable` **`false` DÖNDÜRMEZ** — döndürseydi Laravel'in kendi
      * loglaması durur ve paket uygulamanın davranışını değiştirmiş olurdu.
@@ -191,7 +312,12 @@ class NabizServiceProvider extends ServiceProvider
     private function hookRequests(): void
     {
         try {
-            if (! $this->app->runningInConsole()) {
+            /*
+            | Octane işçileri CLI altında çalışıyor; yalnızca
+            | runningInConsole()'a bakılınca Octane'da istek ölçümü hiç
+            | kurulmuyordu — yavaş istek, 5xx ve canlılık gelmiyordu.
+            */
+            if (! $this->app->runningInConsole() || Recorder::octane()) {
                 $this->app->make(Kernel::class)->pushMiddleware(MeasureRequest::class);
             }
         } catch (Throwable) {
