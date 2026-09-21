@@ -10,6 +10,23 @@ composer require allturko/nabiz
 
 ---
 
+## 0.2.4
+
+### Eklendi
+
+- **Zaman aşımına uğrayan kuyruk işi raporlanıyor** (`JobTimedOut`).
+  Deneme hakkı bitmişse Laravel işi başarısız sayıyor ve `JobFailed`
+  geliyordu; hak kaldığında ise işçi süreci sinyalle öldürülüyor ve
+  panele hiçbir iz düşmüyordu. Oysa zaman aşımına uğrayan iş, tekrar
+  denenip başarılı olsa bile arıza işareti: kuyruk birikiyor ve süreç her
+  turda ölüyor.
+
+  Laravel önce işi başarısız işaretleyip sonra olayı yaydığı için iki kayıt
+  riski vardı; iş başına işaret tutuluyor, tek kayıt açılıyor. Stack yok:
+  istisna üretilmiyor.
+
+---
+
 ## 0.2.3
 
 ### Eklendi

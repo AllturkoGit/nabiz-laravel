@@ -89,6 +89,7 @@ geçerli ile geçersiz imzayı dışarıya aynı yanıtla karşılar.
 |---|---|
 | Deneme hakkı biten kuyruk işi | `job_failed` — "Yol" sütununda işin sınıfı. Laravel aynı hatayı ardından handler'a da veriyor; tek kayıt kalır |
 | Ara denemede düşen iş | `exception` (her deneme) |
+| Zaman aşımına uğrayan iş | `job_failed` — mesajda iş ve süre, stack yok (süreç sinyalle ölüyor). Hakkı bitmişse yukarıdaki satır geçerli, ikinci kayıt açılmaz (0.2.4+) |
 | Başarısız zamanlanmış görev | `command_failed` — "Yol": `artisan rapor:gonder`. Sıfır olmayan çıkış kodu dahil. PHP yolu addan ve mesajdan atılır |
 | Yalnızca kuyruk/zamanlayıcı çalıştıran uygulama | Canlılık nabzı iş bitiminde, kuyruk döngüsünde ve görev bitiminde de atılır; önbelleğe dakikada en fazla bir kez bakılır |
 | Senkron kuyruk (`sync`, `deferred`) | İş isteğin içinde çalışır; isteğin ölçümü bozulmaz. Başarısız iş yine `job_failed` açar ve isteği işaretler |

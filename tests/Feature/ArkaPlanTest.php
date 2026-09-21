@@ -11,6 +11,7 @@ use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Http\Request;
+use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\InteractsWithQueue;
 use Symfony\Component\HttpFoundation\Response;
@@ -164,4 +165,65 @@ test('Recorder açılışta çözülür, Octane kopyaları aynı örneği payla�
     $kopya = clone $this->app;
 
     expect($kopya->make(Recorder::class))->toBe($this->app->make(Recorder::class));
+});
+
+/*
+| Zaman aşımına uğrayan iş.
+|
+| Deneme hakkı bitmişse Laravel işi başarısız sayıyor ve JobFailed geliyor.
+| Hak kaldığında ise işçi süreci sinyalle öldürülüyor ve eskiden hiçbir olay
+| gelmiyordu: kuyruk birikiyor, panelde tek iz kalmıyordu.
+*/
+test('zaman aşımına uğrayan iş job_failed olarak gelir', function () {
+    $is = new class
+    {
+        public function resolveName(): string
+        {
+            return 'App\Jobs\RaporHazirla';
+        }
+
+        public function timeout(): int
+        {
+            return 60;
+        }
+    };
+
+    event(new JobTimedOut('redis', $is));
+
+    $olaylar = array_values(array_filter($this->gonderilenler, fn ($o) => ! isset($o['events'])));
+
+    expect(array_column($olaylar, 'kind'))->toBe(['job_failed'])
+        ->and($olaylar[0]['msg'])->toBe('Kuyruk işi zaman aşımına uğradı: App\Jobs\RaporHazirla (60 sn)')
+        ->and($olaylar[0]['route'])->toBe('App\Jobs\RaporHazirla')
+        ->and($olaylar[0]['exception_class'])->toBe('JobTimedOut');
+});
+
+/*
+| Laravel önce işi başarısız işaretliyor (JobFailed), sonra JobTimedOut
+| yayıyor (Worker::registerTimeoutHandler). İkisi de raporlansaydı tek arıza
+| panelde iki satır olurdu.
+*/
+test('hakkı biten işte zaman aşımı ikinci kayıt açmaz', function () {
+    $recorder = $this->app->make(Recorder::class);
+
+    $recorder->recordJobFailed('App\Jobs\RaporHazirla', new RuntimeException('zaman aşımı'));
+    $recorder->recordJobTimedOut('App\Jobs\RaporHazirla', 60);
+
+    $olaylar = array_values(array_filter($this->gonderilenler, fn ($o) => ! isset($o['events'])));
+
+    expect($olaylar)->toHaveCount(1)
+        ->and($olaylar[0]['exception_class'])->toBe(RuntimeException::class);
+});
+
+/* Sonraki iş temiz başlamalı: işaret JobProcessing'de sıfırlanıyor. */
+test('sonraki işin zaman aşımı raporlanır', function () {
+    $recorder = $this->app->make(Recorder::class);
+
+    $recorder->recordJobFailed('App\Jobs\Birinci', new RuntimeException('patladı'));
+    $recorder->reset();
+    $recorder->recordJobTimedOut('App\Jobs\Ikinci', 30);
+
+    $olaylar = array_values(array_filter($this->gonderilenler, fn ($o) => ! isset($o['events'])));
+
+    expect(array_column($olaylar, 'route'))->toBe(['App\Jobs\Birinci', 'App\Jobs\Ikinci']);
 });

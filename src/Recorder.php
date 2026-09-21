@@ -74,6 +74,13 @@ class Recorder
      */
     private array $pending = [];
 
+    /*
+    | Bu iş için kayıt açıldı mı. Zaman aşımında Laravel önce işi başarısız
+    | işaretliyor (JobFailed), sonra JobTimedOut yayıyor; ikisi de
+    | raporlansaydı tek arıza panelde iki satır olurdu.
+    */
+    private bool $jobReported = false;
+
     /** terminate aşaması: artık ertelemek yok, doğrudan gönder. */
     private bool $terminating = false;
 
@@ -100,6 +107,7 @@ class Recorder
      */
     public function reset(): void
     {
+        $this->jobReported = false;
         $this->startedAt = null;
         $this->queryCount = 0;
         $this->slowestQueryMs = null;
@@ -184,7 +192,42 @@ class Recorder
      */
     public function recordJobFailed(string $job, Throwable $e): array
     {
+        $this->jobReported = true;
+
         return $this->recordThrowable('job_failed', $e, mb_substr($job, 0, 300));
+    }
+
+    /**
+     * Zaman aşımına uğrayan kuyruk işi.
+     *
+     * Deneme hakkı bitmişse Laravel işi zaten başarısız sayıyor ve
+     * `JobFailed` geliyor; kayıt orada açılır, burası atlanır. Hak
+     * kaldığında ise iş yeniden denenecek diye HİÇBİR olay gelmiyordu:
+     * işçi süreci sinyalle öldürülüyor ve panelde tek iz kalmıyordu. Oysa
+     * zaman aşımına uğrayan iş, tekrar denenip başarılı olsa bile arıza
+     * işareti — kuyruk birikiyor ve süreç her turda ölüyor.
+     *
+     * İstisna yok (süreç sinyalle ölüyor), bu yüzden stack de yok.
+     *
+     * @return array{sent: bool, status?: int, error?: string}
+     */
+    public function recordJobTimedOut(string $job, ?int $saniye = null): array
+    {
+        if ($this->jobReported) {
+            return ['sent' => false, 'error' => 'zaten-raporlandi'];
+        }
+
+        $this->jobReported = true;
+        $sure = $saniye !== null ? " ({$saniye} sn)" : '';
+
+        return $this->send([
+            'kind' => 'job_failed',
+            // İş adı mesajda: parmak izi yolu içermiyor, iki ayrı işin zaman
+            // aşımı aynı satırda toplanmamalı.
+            'msg' => Scrubber::text("Kuyruk işi zaman aşımına uğradı: {$job}{$sure}", 500),
+            'exception_class' => 'JobTimedOut',
+            'route' => mb_substr($job, 0, 300),
+        ]);
     }
 
     /**

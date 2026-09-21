@@ -16,6 +16,7 @@ use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Jobs\SyncJob;
 use Illuminate\Support\Facades\DB;
@@ -126,6 +127,16 @@ class NabizServiceProvider extends ServiceProvider
                 fn (Recorder $r) => $r->recordJobFailed($this->jobName($e->job), $e->exception),
             ));
 
+            /*
+            | Zaman aşımı: deneme hakkı bitmişse JobFailed ÖNCE geliyor
+            | (Worker::registerTimeoutHandler) ve kayıt orada açılıyor. Bu
+            | dinleyici yalnızca "iş yeniden denenecek ama süreç öldü"
+            | durumunu yakalıyor — eskiden hiçbir iz bırakmıyordu.
+            */
+            $events->listen(JobTimedOut::class, fn (JobTimedOut $e) => $this->safely(
+                fn (Recorder $r) => $r->recordJobTimedOut($this->jobName($e->job), $this->jobTimeout($e->job)),
+            ));
+
             $events->listen(JobProcessed::class, fn (JobProcessed $e) => $this->syncJob($e->job)
                 ? null
                 : $this->safely(fn (Recorder $r) => $r->heartbeatIfDue()));
@@ -169,6 +180,18 @@ class NabizServiceProvider extends ServiceProvider
                 || in_array($job->getConnectionName(), ['sync', 'deferred'], true);
         } catch (Throwable) {
             return false;
+        }
+    }
+
+    /** İşin kendi zaman aşımı; tanımsızsa null (worker seçeneği geçerli). */
+    private function jobTimeout(mixed $job): ?int
+    {
+        try {
+            $sure = $job->timeout();
+
+            return is_numeric($sure) ? (int) $sure : null;
+        } catch (Throwable) {
+            return null;
         }
     }
 
